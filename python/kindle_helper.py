@@ -22,17 +22,6 @@ import re
 import sys
 import zipfile
 
-from kfxlib.epub_position import PositionTranslationError, translate_pair
-
-from dedrm.drmion import (
-    CONT_SIGNATURE,
-    DRMION_SIGNATURE,
-    decrypt as decrypt_drmion,
-    encryption_key_ids,
-)
-
-VERSION = 1
-
 # ---------------------------------------------------------------------------
 # kfxlib setup — ensure bundled plugin modules (pypdf, typing_extensions) are
 # importable even when calibre is not installed.
@@ -48,6 +37,17 @@ if not os.path.isdir(_PLUGIN_MODULES):
     _PLUGIN_MODULES = os.path.join(_THIS_DIR, "calibre-plugin-modules")
 if os.path.isdir(_PLUGIN_MODULES) and _PLUGIN_MODULES not in sys.path:
     sys.path.insert(0, _PLUGIN_MODULES)
+
+from kfxlib.epub_position import PositionTranslationError, translate_pair
+
+from dedrm.drmion import (
+    CONT_SIGNATURE,
+    DRMION_SIGNATURE,
+    decrypt as decrypt_drmion,
+    encryption_key_ids,
+)
+
+VERSION = 1
 
 # ---------------------------------------------------------------------------
 # JSON output helpers (same protocol as the Go binary)

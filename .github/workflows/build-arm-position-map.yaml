@@ -22,6 +22,9 @@ jobs:
       - name: Build ARMv7 helper image
         run: docker build --platform linux/arm/v7 --file .github/Dockerfile.arm --tag kindle-helper-arm .
 
+      - name: Smoke-test ARMv7 helper runtime
+        run: docker run --rm kindle-helper-arm /build/output/kindle-helper --help
+
       - name: Extract helper bundle
         run: |
           container_id="$(docker create kindle-helper-arm)"
