@@ -8,6 +8,9 @@ import com.amazon.ebook.booklet.reader.sdk.content.Book;
 import com.amazon.ebook.booklet.reader.sdk.content.LastPageRead;
 import com.amazon.ebook.booklet.reader.sdk.content.LprSidecarAdapter;
 import com.amazon.ebook.booklet.reader.sdk.content.Position;
+import com.amazon.ebook.booklet.reader.impl.todo.ContentCatalogLprUtils;
+import com.amazon.kindle.content.catalog.CatalogService;
+import com.amazon.kindle.content.catalog.MutableItem;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileWriter;
@@ -19,8 +22,8 @@ import java.util.Optional;
 import java.util.Properties;
 
 /** Persists an exact KOReader location using Kindle's sidecar and ReaderSDK APIs. */
-public final class KindlePluginReadingProgressAgentV5 {
-    private KindlePluginReadingProgressAgentV5() {}
+public final class KindlePluginReadingProgressAgentV6 {
+    private KindlePluginReadingProgressAgentV6() {}
 
     public static void agentmain(String payloadPath, Instrumentation ignored) {
         PrintWriter out = null;
@@ -101,11 +104,24 @@ public final class KindlePluginReadingProgressAgentV5 {
                 wrapped.get(), actualShort, position.nX(), 30000L);
             Optional<SaveReadingProgressResponse> response = proxy.a(request);
             boolean accepted = response.isPresent() && response.get().cuY;
+            double renderedPercent = nativePercent(persistedPosition);
+            boolean catalogSaved = false;
+            if (accepted) {
+                stage = "refresh_reader_progress";
+                sdk.xQ();
+                stage = "save_catalog_progress";
+                CatalogService catalog = (CatalogService) sdk.getService(CatalogService.class);
+                MutableItem item = ContentCatalogLprUtils.a(catalog, nativePath);
+                if (item == null) throw new IllegalStateException("native catalog item unavailable");
+                item.setProperty("percentFinished", Float.valueOf((float) renderedPercent));
+                catalogSaved = ContentCatalogLprUtils.a(sdk, catalog, item);
+            }
             out.println("saved_short=" + actualShort);
             out.println("long_position=" + position.nX());
-            out.println("native_percent=" + nativePercent(persistedPosition));
+            out.println("native_percent=" + renderedPercent);
             out.println("native_progress_accepted=" + accepted);
-            out.println("success=" + accepted);
+            out.println("catalog_progress_saved=" + catalogSaved);
+            out.println("success=" + (accepted && catalogSaved));
         } catch (Throwable error) {
             if (out != null) {
                 out.println("failed_stage=" + stage);

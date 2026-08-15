@@ -241,7 +241,8 @@ function HelperClient:saveNativeProgress(asin, native_path, position)
     end
     local values, result_error = readNativeProgressResult(request_id, asin)
     local native_percent = values and tonumber(values.native_percent)
-    if not values or tonumber(values.saved_short) ~= position.pid
+    if not values or values.catalog_progress_saved ~= "true"
+        or tonumber(values.saved_short) ~= position.pid
         or values.long_position ~= position.long or not native_percent
         or native_percent < 0 or native_percent > 100
     then
