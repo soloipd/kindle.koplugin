@@ -197,7 +197,7 @@ describe("ReadingStateSync", function()
         ReadingStateSync._realGetAuthoritativeKindleXPointer =
             ReadingStateSync.getAuthoritativeKindleXPointer
         ReadingStateSync.saveAuthoritativeNativePosition = function()
-            return true
+            return 37
         end
         ReadingStateSync.getAuthoritativeKindleXPointer = function()
             return "/body/DocFragment/body/p/text().0"
@@ -520,7 +520,7 @@ describe("ReadingStateSync", function()
             local native_save = nil
             sync.saveAuthoritativeNativePosition = function(_, key, source, epub)
                 native_save = { key = key, source = source, epub = epub }
-                return true
+                return 36.8
             end
             local ds = createMockDocSettings(history_path, {
                 percent_finished = 0.75,
@@ -529,7 +529,7 @@ describe("ReadingStateSync", function()
 
             assert.is_true(sync:syncToKindleAutomatic("B007N6JEII", history_path, ds))
             assert.equals(1, #writes)
-            assert.equals(75, writes[1].percent)
+            assert.equals(36.8, writes[1].percent)
             assert.equals("B007N6JEII", native_save.key)
 
             restoreReadKindleState(sync, original_read)
@@ -670,7 +670,7 @@ describe("ReadingStateSync", function()
                     calls.asin = asin
                     calls.native_path = native_path
                     calls.position = position
-                    return true
+                    return true, nil, 36.8
                 end,
             }
             local sync = ReadingStateSync:new(client)
@@ -678,7 +678,7 @@ describe("ReadingStateSync", function()
                 last_xpointer = "/body/DocFragment/body/p/text().1",
             })
 
-            assert.is_true(ReadingStateSync._realSaveAuthoritativeNativePosition(
+            assert.equals(36.8, ReadingStateSync._realSaveAuthoritativeNativePosition(
                 sync, "B007N6JEII", "/mnt/us/documents/book_B007N6JEII.kfx",
                 "/cache/book.epub", ds
             ))

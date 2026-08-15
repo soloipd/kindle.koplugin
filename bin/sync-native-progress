@@ -5,7 +5,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/kindle.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/native-reading-progress-agent-v3.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/native-reading-progress-agent-v5.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 LOCK_DIR="/tmp/kindle-progress-sync.lock"
 LOCK_PID="$LOCK_DIR/pid"

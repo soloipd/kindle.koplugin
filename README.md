@@ -45,7 +45,11 @@ and **Never** leaves the destination unchanged. The plugin translates KOReader
 XPointers to Kindle KFX coordinates, persists them through Kindle's ReaderSDK,
 and reverse-translates the native last-page-read position when returning to
 KOReader. The shelf percentage is updated only after the authoritative native
-save succeeds.
+save succeeds. KOReader and Kindle calculate percentages against different
+rendered content lengths, so the native shelf is written with Kindle's rendered
+percentage rather than copying KOReader's percentage. This keeps the native
+shelf and native reader consistent while the exact text position remains the
+cross-reader source of truth.
 
 ### Compatibility
 

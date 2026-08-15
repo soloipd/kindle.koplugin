@@ -177,6 +177,27 @@ local function hexEncode(value)
     end))
 end
 
+local function readNativeProgressResult(request_id, asin)
+    local result_file = io.open(
+        "/mnt/us/koreader/settings/kindle_native_progress_debug.log", "rb"
+    )
+    if not result_file then
+        return nil, "native progress result unavailable"
+    end
+    local values = {}
+    for line in result_file:lines() do
+        local key, value = line:match("^([a-z_]+)=(.*)$")
+        if key then values[key] = value end
+    end
+    result_file:close()
+    if values.request_id ~= request_id or values.asin ~= asin
+        or values.success ~= "true" or not values.long_position
+    then
+        return nil, "native progress result mismatch"
+    end
+    return values
+end
+
 --- Save an exact position through the native Kindle ReaderSDK.
 function HelperClient:saveNativeProgress(asin, native_path, position)
     if type(asin) ~= "string" or not asin:match("^B[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") then
@@ -218,8 +239,16 @@ function HelperClient:saveNativeProgress(asin, native_path, position)
         logger.warn("KindlePlugin: authoritative native progress save failed with status", result)
         return false, "native progress save failed"
     end
+    local values, result_error = readNativeProgressResult(request_id, asin)
+    local native_percent = values and tonumber(values.native_percent)
+    if not values or tonumber(values.saved_short) ~= position.pid
+        or values.long_position ~= position.long or not native_percent
+        or native_percent < 0 or native_percent > 100
+    then
+        return false, result_error or "native progress result mismatch"
+    end
     logger.info("KindlePlugin: authoritative native progress saved:", asin, position.pid)
-    return true
+    return true, nil, native_percent
 end
 
 --- Read Kindle's authoritative local last-page-read position.
@@ -255,26 +284,12 @@ function HelperClient:readNativeProgress(asin, native_path)
     if status ~= 0 then
         return nil, "native progress read failed"
     end
-    local result_file = io.open(
-        "/mnt/us/koreader/settings/kindle_native_progress_debug.log", "rb"
-    )
-    if not result_file then
-        return nil, "native progress result unavailable"
-    end
-    local values = {}
-    for line in result_file:lines() do
-        local key, value = line:match("^([a-z_]+)=(.*)$")
-        if key then values[key] = value end
-    end
-    result_file:close()
-    if values.request_id ~= request_id or values.asin ~= asin
-        or values.success ~= "true" or not values.long_position
-    then
-        return nil, "native progress result mismatch"
-    end
+    local values, result_error = readNativeProgressResult(request_id, asin)
+    if not values then return nil, result_error end
     return {
         long = values.long_position,
         pid = tonumber(values.saved_short),
+        percent = tonumber(values.native_percent),
     }
 end
 
