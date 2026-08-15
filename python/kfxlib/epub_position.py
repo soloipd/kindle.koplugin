@@ -171,3 +171,101 @@ def translate_pair(epub_path, start_xpointer, end_xpointer):
     start = translate_xpointer(epub_path, start_xpointer)
     end = translate_xpointer(epub_path, end_xpointer)
     return {"start": start, "end": end}
+
+
+def _decode_native_long(long_position):
+    try:
+        raw = base64.b64decode(long_position, validate=True)
+    except (ValueError, TypeError) as error:
+        raise PositionTranslationError("invalid native long position") from error
+    if len(raw) != 9 or raw[0] != 1:
+        raise PositionTranslationError("unsupported native long position")
+    return int.from_bytes(raw[1:5], "little"), int.from_bytes(raw[5:9], "little")
+
+
+def _element_step(element, parent):
+    name = _local_name(element.tag)
+    siblings = _children_named(parent, name)
+    index = siblings.index(element) + 1
+    return name if index == 1 else "%s[%d]" % (name, index)
+
+
+def _xpointer_for_text(body, target_parent, target_node, offset, fragment_index):
+    parents = {child: parent for parent in body.iter() for child in list(parent)}
+    ancestors = []
+    current = target_parent
+    while current is not body:
+        parent = parents.get(current)
+        if parent is None:
+            raise PositionTranslationError("native position is outside EPUB body")
+        ancestors.append(_element_step(current, parent))
+        current = parent
+    ancestors.reverse()
+    text_nodes = [node for node, _text in _text_nodes(target_parent)]
+    try:
+        text_index = text_nodes.index(target_node) + 1
+    except ValueError as error:
+        raise PositionTranslationError("native text node is unavailable") from error
+    fragment = "DocFragment" if fragment_index == 1 else "DocFragment[%d]" % fragment_index
+    steps = ["body", fragment, "body"] + ancestors
+    text_step = "text()" if text_index == 1 else "text()[%d]" % text_index
+    steps.append(text_step)
+    return "/" + "/".join(steps) + "." + str(offset)
+
+
+def _find_text_at_offset(anchor, requested_offset):
+    consumed = 0
+
+    def visit(element):
+        nonlocal consumed
+        if element.text is not None:
+            length = len(element.text)
+            if requested_offset <= consumed + length:
+                return element, (element, "text"), requested_offset - consumed
+            consumed += length
+        for child in list(element):
+            found = visit(child)
+            if found is not None:
+                return found
+            if child.tail is not None:
+                length = len(child.tail)
+                if requested_offset <= consumed + length:
+                    return element, (child, "tail"), requested_offset - consumed
+                consumed += length
+        return None
+
+    result = visit(anchor)
+    if result is None:
+        raise PositionTranslationError("native offset is outside KFX element")
+    return result
+
+
+def translate_native_position(epub_path, long_position):
+    """Translate an authoritative Kindle long position back to KOReader XPointer."""
+    eid, eid_offset = _decode_native_long(long_position)
+    with zipfile.ZipFile(epub_path) as epub:
+        spine = _read_spine(epub)
+        for fragment_index, document_path in enumerate(spine, 1):
+            document = ElementTree.fromstring(epub.read(document_path))
+            bodies = [node for node in document.iter() if _local_name(node.tag) == "body"]
+            if not bodies:
+                continue
+            body = bodies[0]
+            for anchor in body.iter():
+                if anchor.get("data-kfx-eid") != str(eid):
+                    continue
+                target_parent, target_node, text_offset = _find_text_at_offset(
+                    anchor, eid_offset)
+                xpointer = _xpointer_for_text(
+                    body, target_parent, target_node, text_offset, fragment_index)
+                verified = translate_xpointer(epub_path, xpointer)
+                if verified["long"] != long_position:
+                    raise PositionTranslationError("reverse position verification failed")
+                return {
+                    "xpointer": xpointer,
+                    "eid": eid,
+                    "eid_offset": eid_offset,
+                    "pid": verified["pid"],
+                    "long": long_position,
+                }
+    raise PositionTranslationError("native KFX element is missing from EPUB")

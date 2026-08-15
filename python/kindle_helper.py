@@ -38,7 +38,8 @@ if not os.path.isdir(_PLUGIN_MODULES):
 if os.path.isdir(_PLUGIN_MODULES) and _PLUGIN_MODULES not in sys.path:
     sys.path.insert(0, _PLUGIN_MODULES)
 
-from kfxlib.epub_position import PositionTranslationError, translate_pair
+from kfxlib.epub_position import (
+    PositionTranslationError, translate_native_position, translate_pair)
 
 from dedrm.drmion import (
     CONT_SIGNATURE,
@@ -733,6 +734,22 @@ def cmd_translate_positions(args):
         }, code=1)
 
 
+def cmd_translate_native_position(args):
+    try:
+        translated = translate_native_position(args.epub, args.long_position)
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            **translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="kindle-helper")
     sub = parser.add_subparsers(dest="command")
@@ -781,6 +798,10 @@ def main():
     p_translates.add_argument("--epub", required=True)
     p_translates.add_argument("--request", required=True)
 
+    p_translate_native = sub.add_parser("translate-native-position")
+    p_translate_native.add_argument("--epub", required=True)
+    p_translate_native.add_argument("--long", dest="long_position", required=True)
+
     # extract-key
     p_extract = sub.add_parser("extract-key")
     p_extract.add_argument("--input", required=True,
@@ -805,6 +826,7 @@ def main():
         "position": cmd_position,
         "translate-position": cmd_translate_position,
         "translate-positions": cmd_translate_positions,
+        "translate-native-position": cmd_translate_native_position,
         "extract-key": cmd_extract_key,
     }
 

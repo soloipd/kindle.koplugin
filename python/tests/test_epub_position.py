@@ -10,7 +10,8 @@ PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
 
-from kfxlib.epub_position import PositionTranslationError, translate_xpointer
+from kfxlib.epub_position import (
+    PositionTranslationError, translate_native_position, translate_xpointer)
 
 
 CONTAINER = b'''<?xml version="1.0"?>
@@ -61,6 +62,22 @@ class EpubPositionTests(unittest.TestCase):
                 self.make_epub(),
                 "/body/DocFragment/body/p/em/text().99",
             )
+
+    def test_round_trips_native_position_to_nested_text_xpointer(self):
+        native = translate_xpointer(
+            self.make_epub(), "/body/DocFragment/body/p/em/text().3")
+        restored = translate_native_position(self.make_epub(), native["long"])
+        self.assertEqual(native["long"], restored["long"])
+        self.assertEqual(native["pid"], restored["pid"])
+        self.assertEqual(
+            "/body/DocFragment/body/p/em/text().3", restored["xpointer"])
+
+    def test_round_trips_native_position_to_parent_tail_text(self):
+        native = translate_xpointer(
+            self.make_epub(), "/body/DocFragment/body/p/text()[2].2")
+        restored = translate_native_position(self.make_epub(), native["long"])
+        self.assertEqual(
+            "/body/DocFragment/body/p/text()[2].2", restored["xpointer"])
 
 
 if __name__ == "__main__":
