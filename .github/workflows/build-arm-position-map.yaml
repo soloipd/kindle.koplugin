@@ -37,6 +37,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Smoke-test ARMv7 helper runtime
+        run: docker run --rm kindle-helper-arm /build/output/kindle-helper --help
+
       - name: Extract helper bundle
         run: |
           container_id="$(docker create kindle-helper-arm)"
