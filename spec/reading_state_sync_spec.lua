@@ -711,7 +711,7 @@ describe("ReadingStateSync", function()
             assert.is_false(sync:syncToKindle("B001", "/path/book.kfx", {}))
         end)
 
-        it("should write percent and status to Kindle", function()
+        it("should write Kindle-native percent and status to Kindle", function()
             local sync = ReadingStateSync:new()
             sync:setEnabled(true)
 
@@ -727,7 +727,7 @@ describe("ReadingStateSync", function()
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
             assert.equals(1, #write_log)
-            assert.equals(75, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("reading", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -748,7 +748,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(0, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
 
             restoreWriteKindleState(sync, orig_write)
             sync.updateYjrPosition = orig_update
@@ -769,7 +769,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(100, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("complete", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -790,7 +790,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(42, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("reading", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -988,7 +988,7 @@ describe("ReadingStateSync", function()
             local result = sync:syncBidirectional("B007N6JEII", "/mnt/us/documents/Throne of Glass_B007N6JEII.kfx", ds)
             assert.is_true(result)
             assert.equals(1, #write_log)
-            assert.equals(85, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
 
             restoreReadKindleState(sync, orig_read)
             restoreWriteKindleState(sync, orig_write)
