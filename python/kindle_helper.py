@@ -22,6 +22,8 @@ import re
 import sys
 import zipfile
 
+from kfxlib.epub_position import PositionTranslationError, translate_pair
+
 from dedrm.drmion import (
     CONT_SIGNATURE,
     DRMION_SIGNATURE,
@@ -687,6 +689,22 @@ def cmd_extract_key(args):
         })
 
 
+def cmd_translate_position(args):
+    try:
+        translated = translate_pair(args.epub, args.start, args.end)
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            **translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="kindle-helper")
     sub = parser.add_subparsers(dest="command")
@@ -726,6 +744,11 @@ def main():
     p_pos.add_argument("--old-percent", type=float, required=True)
     p_pos.add_argument("--new-percent", type=float, required=True)
 
+    p_translate = sub.add_parser("translate-position")
+    p_translate.add_argument("--epub", required=True)
+    p_translate.add_argument("--start", required=True)
+    p_translate.add_argument("--end", required=True)
+
     # extract-key
     p_extract = sub.add_parser("extract-key")
     p_extract.add_argument("--input", required=True,
@@ -748,6 +771,7 @@ def main():
         "decrypt": cmd_decrypt,
         "drm-init": cmd_drm_init,
         "position": cmd_position,
+        "translate-position": cmd_translate_position,
         "extract-key": cmd_extract_key,
     }
 
