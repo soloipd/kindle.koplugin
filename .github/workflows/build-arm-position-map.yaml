@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   build-arm-helper:
-    runs-on: ubuntu-latest
+    # Native ARM64 avoids the extreme ARMv7 compiler slowdown seen on x64/QEMU.
+    # setup-qemu still registers ARMv7 compatibility for the container itself.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
