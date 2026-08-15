@@ -9,6 +9,9 @@ from .ion import (ion_type, IonAnnotation, IonList, IonSExp, IonString, IonStruc
 from .message_logging import log
 from .utilities import (check_empty, list_symbols, UUID_MATCH_RE)
 from .yj_structure import SYM_TYPE
+from .kfx_position_map import (
+    POSITION_MAP_FILEPATH, build_position_map, serialize_position_map,
+    tag_position_element)
 from .yj_to_epub_content import KFX_EPUB_Content
 from .yj_to_epub_illustrated_layout import KFX_EPUB_Illustrated_Layout
 from .yj_to_epub_metadata import KFX_EPUB_Metadata
@@ -89,6 +92,9 @@ class KFX_EPUB(
         if metadata_only:
             return
 
+        position_chunks = self.book.collect_content_position_info()
+        self.kfx_position_map, self.kfx_eid_base_pid = build_position_map(
+            position_chunks, asin=self.asin)
         for style_name, yj_properties in self.book_data.get("$157", {}).items():
             self.check_fragment_name(yj_properties, "$157", style_name, delete=False)
 
@@ -106,6 +112,10 @@ class KFX_EPUB(
         self.fixup_styles_and_classes()
         self.create_css_files()
         self.prepare_book_parts()
+        position_map_data = serialize_position_map(self.kfx_position_map)
+        self.manifest_resource(
+            POSITION_MAP_FILEPATH, data=position_map_data,
+            mimetype="application/json")
         self.report_missing_positions()
 
         if RETAIN_UNUSED_RESOURCES:
@@ -179,6 +189,9 @@ class KFX_EPUB(
 
     def decompile_to_epub(self):
         return self.generate_epub()
+
+    def add_kfx_position_attributes(self, elem, eid):
+        tag_position_element(elem, eid, self.kfx_eid_base_pid)
 
     def organize_fragments_by_type(self, fragment_list):
         font_count = 0

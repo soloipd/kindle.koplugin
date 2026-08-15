@@ -1111,6 +1111,7 @@ class KFX_EPUB_Content(object):
                 log.warning("%s content has classification: %s" % (self.content_context, classification))
 
         if location_id:
+            self.add_kfx_position_attributes(content_elem, eid=location_id)
             self.process_position(location_id, 0, content_elem)
 
             if location_id in self.position_anchors:
