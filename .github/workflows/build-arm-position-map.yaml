@@ -2,6 +2,9 @@ name: Build ARM helper with position map
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/goodreads-position-map
 
 permissions:
   contents: read
