@@ -39,7 +39,10 @@ def find_executable(plugin_dir=None, native_dir=None):
     """Return the first ABI-compatible native extractor executable."""
     failures = []
     for path in _candidate_paths(plugin_dir, native_dir):
-        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        # /mnt/us is FUSE-backed on Kindle and may report X_OK as false even
+        # when the native binary is executable. Let subprocess.run() perform
+        # the authoritative execution check and record any OSError below.
+        if not os.path.isfile(path):
             continue
         try:
             result = subprocess.run(
