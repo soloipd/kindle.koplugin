@@ -22,15 +22,6 @@ import re
 import sys
 import zipfile
 
-from dedrm.drmion import (
-    CONT_SIGNATURE,
-    DRMION_SIGNATURE,
-    decrypt as decrypt_drmion,
-    encryption_key_ids,
-)
-
-VERSION = 1
-
 # ---------------------------------------------------------------------------
 # kfxlib setup — ensure bundled plugin modules (pypdf, typing_extensions) are
 # importable even when calibre is not installed.
@@ -46,6 +37,18 @@ if not os.path.isdir(_PLUGIN_MODULES):
     _PLUGIN_MODULES = os.path.join(_THIS_DIR, "calibre-plugin-modules")
 if os.path.isdir(_PLUGIN_MODULES) and _PLUGIN_MODULES not in sys.path:
     sys.path.insert(0, _PLUGIN_MODULES)
+
+from kfxlib.epub_position import (
+    PositionTranslationError, translate_native_position, translate_pair)
+
+from dedrm.drmion import (
+    CONT_SIGNATURE,
+    DRMION_SIGNATURE,
+    decrypt as decrypt_drmion,
+    encryption_key_ids,
+)
+
+VERSION = 1
 
 # ---------------------------------------------------------------------------
 # JSON output helpers (same protocol as the Go binary)
@@ -687,6 +690,66 @@ def cmd_extract_key(args):
         })
 
 
+def cmd_translate_position(args):
+    try:
+        translated = translate_pair(args.epub, args.start, args.end)
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            **translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
+def cmd_translate_positions(args):
+    try:
+        with open(args.request, "r", encoding="utf-8") as request_file:
+            requests = json.load(request_file)
+        if not isinstance(requests, list) or len(requests) > 1000:
+            raise ValueError("invalid position request list")
+        translated = []
+        for request in requests:
+            if not isinstance(request, dict):
+                raise ValueError("invalid position request")
+            translated.append(translate_pair(
+                args.epub,
+                request.get("start"),
+                request.get("end"),
+            ))
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            "positions": translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError, json.JSONDecodeError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
+def cmd_translate_native_position(args):
+    try:
+        translated = translate_native_position(args.epub, args.long_position)
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            **translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="kindle-helper")
     sub = parser.add_subparsers(dest="command")
@@ -726,6 +789,19 @@ def main():
     p_pos.add_argument("--old-percent", type=float, required=True)
     p_pos.add_argument("--new-percent", type=float, required=True)
 
+    p_translate = sub.add_parser("translate-position")
+    p_translate.add_argument("--epub", required=True)
+    p_translate.add_argument("--start", required=True)
+    p_translate.add_argument("--end", required=True)
+
+    p_translates = sub.add_parser("translate-positions")
+    p_translates.add_argument("--epub", required=True)
+    p_translates.add_argument("--request", required=True)
+
+    p_translate_native = sub.add_parser("translate-native-position")
+    p_translate_native.add_argument("--epub", required=True)
+    p_translate_native.add_argument("--long", dest="long_position", required=True)
+
     # extract-key
     p_extract = sub.add_parser("extract-key")
     p_extract.add_argument("--input", required=True,
@@ -748,6 +824,9 @@ def main():
         "decrypt": cmd_decrypt,
         "drm-init": cmd_drm_init,
         "position": cmd_position,
+        "translate-position": cmd_translate_position,
+        "translate-positions": cmd_translate_positions,
+        "translate-native-position": cmd_translate_native_position,
         "extract-key": cmd_extract_key,
     }
 

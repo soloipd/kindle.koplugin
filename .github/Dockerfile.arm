@@ -183,7 +183,8 @@ RUN printf '%s\n' \
 #     main.bin             - Python binary
 #     ld-linux-armhf.so.3  - Bundled dynamic linker
 #     *.so                 - All shared library dependencies
-#     calibre-plugin-modules/ - pypdf, typing_extensions (pure Python, on disk for sys.path)
+#     calibre-plugin-modules/ - kfxlib's bundled plugin modules
+#     pypdf/, typing_extensions.py - runtime-root fallback for eager kfxlib imports
 #     bs4/                 - beautifulsoup4 (pure Python, needed by pypdf)
 RUN mkdir -p /build/output && \
     cp /build/kindle-helper /build/output/kindle-helper && \
@@ -193,7 +194,10 @@ RUN mkdir -p /build/output && \
     mkdir -p /build/output/dist/calibre-plugin-modules && \
     cp -r /build/kfxlib/calibre-plugin-modules/pypdf /build/output/dist/calibre-plugin-modules/ && \
     cp /build/kfxlib/calibre-plugin-modules/typing_extensions.py /build/output/dist/calibre-plugin-modules/ && \
+    cp -r /build/kfxlib/calibre-plugin-modules/pypdf /build/output/dist/ && \
+    cp /build/kfxlib/calibre-plugin-modules/typing_extensions.py /build/output/dist/ && \
     find /build/output/dist/calibre-plugin-modules -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find /build/output/dist/pypdf -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     cp -r /usr/local/lib/python3.11/site-packages/bs4 /build/output/dist/ && \
     find /build/output/dist/bs4 -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     echo "=== Copying Crypto module (pycryptodome) ===" && \
