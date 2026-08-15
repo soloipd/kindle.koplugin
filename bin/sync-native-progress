@@ -8,6 +8,7 @@ PLUGIN_DIR="/mnt/us/koreader/plugins/kindle.koplugin"
 AGENT_JAR="$PLUGIN_DIR/bin/native-reading-progress-agent-v2.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 LOCK_DIR="/tmp/kindle-progress-sync.lock"
+LOCK_PID="$LOCK_DIR/pid"
 ATTACH_LOG="/tmp/kindle-progress-attach.log"
 PUBLISHED_RESULT="/mnt/us/koreader/settings/kindle_native_progress_debug.log"
 lock_acquired=0
@@ -23,7 +24,10 @@ esac
 cleanup() {
     rm -f "$payload"
     if [ -n "$request_result" ]; then rm -f "$request_result"; fi
-    if [ "$lock_acquired" -eq 1 ]; then rmdir "$LOCK_DIR" 2>/dev/null || true; fi
+    if [ "$lock_acquired" -eq 1 ]; then
+        rm -f "$LOCK_PID"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -35,8 +39,25 @@ printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 2
 case "$request_id" in ''|*[!0-9]*) exit 2 ;; esac
 request_result="/tmp/kindle-progress-result-$request_id.log"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then exit 75; fi
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    stale_pid=""
+    if [ -f "$LOCK_PID" ]; then stale_pid="$(sed -n '1p' "$LOCK_PID")"; fi
+    case "$stale_pid" in
+        ''|*[!0-9]*) lock_is_stale=1 ;;
+        *)
+            if kill -0 "$stale_pid" 2>/dev/null; then lock_is_stale=0
+            else lock_is_stale=1
+            fi
+            ;;
+    esac
+    if [ "$lock_is_stale" -eq 1 ]; then
+        rm -f "$LOCK_PID"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then exit 75; fi
+fi
 lock_acquired=1
+printf '%s\n' "$$" >"$LOCK_PID" || exit 9
 framework_pid="$(ps -eo pid,args 2>/dev/null \
     | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }')"
 case "$framework_pid" in ''|*[!0-9]*) exit 5 ;; esac

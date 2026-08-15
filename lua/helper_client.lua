@@ -179,15 +179,20 @@ end
 
 --- Save an exact position through the native Kindle ReaderSDK.
 function HelperClient:saveNativeProgress(asin, native_path, position)
-    if self.native_progress_runner then
-        return self.native_progress_runner(asin, native_path, position)
-    end
     if type(asin) ~= "string" or not asin:match("^B[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") then
         return false, "invalid ASIN"
+    end
+    if type(native_path) ~= "string"
+        or not native_path:match("^/mnt/us/documents/.+%.kfx$")
+    then
+        return false, "invalid native path"
     end
     if type(position) ~= "table" or type(position.long) ~= "string"
         or type(position.pid) ~= "number" then
         return false, "invalid native position"
+    end
+    if self.native_progress_runner then
+        return self.native_progress_runner(asin, native_path, position)
     end
 
     local request_id = tostring(os.time()) .. tostring(math.random(100000, 999999))
@@ -219,11 +224,16 @@ end
 
 --- Read Kindle's authoritative local last-page-read position.
 function HelperClient:readNativeProgress(asin, native_path)
-    if self.native_progress_reader then
-        return self.native_progress_reader(asin, native_path)
-    end
     if type(asin) ~= "string" or #asin ~= 10 or not asin:match("^B[A-Z0-9]+$") then
         return nil, "invalid ASIN"
+    end
+    if type(native_path) ~= "string"
+        or not native_path:match("^/mnt/us/documents/.+%.kfx$")
+    then
+        return nil, "invalid native path"
+    end
+    if self.native_progress_reader then
+        return self.native_progress_reader(asin, native_path)
     end
     local request_id = tostring(os.time()) .. tostring(math.random(100000, 999999))
     local payload_path = "/tmp/kindle-progress-" .. request_id .. ".properties"

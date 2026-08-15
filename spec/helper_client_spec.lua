@@ -175,5 +175,22 @@ describe("HelperClient", function()
                 { long = "ATwFAACbAAAA", pid = 442741 }
             ))
         end)
+
+        it("should reject native progress paths outside the Kindle library", function()
+            local invoked = false
+            local client = HelperClient:new({
+                native_progress_runner = function()
+                    invoked = true
+                    return true
+                end,
+            })
+            local ok, err = client:saveNativeProgress(
+                "B007N6JEII", "/tmp/book.kfx",
+                { long = "ATwFAACbAAAA", pid = 442741 }
+            )
+            assert.is_false(ok)
+            assert.equals("invalid native path", err)
+            assert.is_false(invoked)
+        end)
     end)
 end)
