@@ -219,12 +219,18 @@ function ReadingStateSync:saveAuthoritativeNativePosition(cde_key, source_path, 
         logger.warn("KindlePlugin: exact native position translation failed:", translate_error)
         return false
     end
-    local saved, save_error = self.helper_client:saveNativeProgress(asin, source_path, position)
+    local saved, save_error, native_percent = self.helper_client:saveNativeProgress(
+        asin, source_path, position
+    )
     if not saved then
         logger.warn("KindlePlugin: exact native progress save failed:", save_error)
         return false
     end
-    return true
+    if type(native_percent) ~= "number" or native_percent < 0 or native_percent > 100 then
+        logger.warn("KindlePlugin: native progress save omitted Kindle percentage")
+        return false
+    end
+    return native_percent
 end
 
 --- Resolve Kindle's exact local LPR back to a KOReader XPointer.
@@ -498,7 +504,6 @@ function ReadingStateSync:syncToKindle(cde_key, source_path, doc_settings, epub_
     end
 
     local kr_percent = doc_settings:readSetting("percent_finished") or 0
-    local kindle_percent = kr_percent * 100
     local summary = doc_settings:readSetting("summary") or {}
     local kr_status = summary.status or "reading"
     local current_timestamp = os.time()
@@ -512,13 +517,14 @@ function ReadingStateSync:syncToKindle(cde_key, source_path, doc_settings, epub_
         source_path
     )
 
-    if not self:saveAuthoritativeNativePosition(
+    local native_percent = self:saveAuthoritativeNativePosition(
         cde_key, source_path, epub_path, doc_settings
-    ) then
+    )
+    if not native_percent then
         return false
     end
     return self:writeKindleState(
-        cde_key, source_path, kindle_percent, current_timestamp, kr_status
+        cde_key, source_path, native_percent, current_timestamp, kr_status
     )
 end
 
@@ -622,13 +628,14 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
         local current_timestamp = os.time()
         -- Always verify the exact LPR even when the rounded shelf percentage
         -- already matches; two positions inside one percentage point differ.
-        if self:saveAuthoritativeNativePosition(
+        local native_percent = self:saveAuthoritativeNativePosition(
             cde_key, source_path, epub_path, doc_settings
-        ) then
+        )
+        if native_percent then
             sync_completed = self:writeKindleState(
                 cde_key,
                 source_path,
-                kr_percent * 100,
+                native_percent,
                 current_timestamp,
                 kr_status
             )
@@ -733,11 +740,12 @@ function ReadingStateSync:executePushToKindle(cde_key, source_path, doc_settings
 
         logger.info("KindlePlugin: Syncing TO Kindle (PUSH)")
         local epub_path = doc_settings.data and doc_settings.data.doc_path
-        if self:saveAuthoritativeNativePosition(
+        local native_percent = self:saveAuthoritativeNativePosition(
             cde_key, source_path, epub_path, doc_settings
-        ) then
+        )
+        if native_percent then
             sync_completed = self:writeKindleState(
-                cde_key, source_path, kr_percent * 100, current_timestamp, kr_status
+                cde_key, source_path, native_percent, current_timestamp, kr_status
             )
         end
     end, sync_details)

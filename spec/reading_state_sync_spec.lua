@@ -197,7 +197,7 @@ describe("ReadingStateSync", function()
         ReadingStateSync._realGetAuthoritativeKindleXPointer =
             ReadingStateSync.getAuthoritativeKindleXPointer
         ReadingStateSync.saveAuthoritativeNativePosition = function()
-            return true
+            return 37
         end
         ReadingStateSync.getAuthoritativeKindleXPointer = function()
             return "/body/DocFragment/body/p/text().0"
@@ -520,7 +520,7 @@ describe("ReadingStateSync", function()
             local native_save = nil
             sync.saveAuthoritativeNativePosition = function(_, key, source, epub)
                 native_save = { key = key, source = source, epub = epub }
-                return true
+                return 36.8
             end
             local ds = createMockDocSettings(history_path, {
                 percent_finished = 0.75,
@@ -529,7 +529,7 @@ describe("ReadingStateSync", function()
 
             assert.is_true(sync:syncToKindleAutomatic("B007N6JEII", history_path, ds))
             assert.equals(1, #writes)
-            assert.equals(75, writes[1].percent)
+            assert.equals(36.8, writes[1].percent)
             assert.equals("B007N6JEII", native_save.key)
 
             restoreReadKindleState(sync, original_read)
@@ -670,7 +670,7 @@ describe("ReadingStateSync", function()
                     calls.asin = asin
                     calls.native_path = native_path
                     calls.position = position
-                    return true
+                    return true, nil, 36.8
                 end,
             }
             local sync = ReadingStateSync:new(client)
@@ -678,7 +678,7 @@ describe("ReadingStateSync", function()
                 last_xpointer = "/body/DocFragment/body/p/text().1",
             })
 
-            assert.is_true(ReadingStateSync._realSaveAuthoritativeNativePosition(
+            assert.equals(36.8, ReadingStateSync._realSaveAuthoritativeNativePosition(
                 sync, "B007N6JEII", "/mnt/us/documents/book_B007N6JEII.kfx",
                 "/cache/book.epub", ds
             ))
@@ -711,7 +711,7 @@ describe("ReadingStateSync", function()
             assert.is_false(sync:syncToKindle("B001", "/path/book.kfx", {}))
         end)
 
-        it("should write percent and status to Kindle", function()
+        it("should write Kindle-native percent and status to Kindle", function()
             local sync = ReadingStateSync:new()
             sync:setEnabled(true)
 
@@ -727,7 +727,7 @@ describe("ReadingStateSync", function()
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
             assert.equals(1, #write_log)
-            assert.equals(75, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("reading", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -748,7 +748,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(0, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
 
             restoreWriteKindleState(sync, orig_write)
             sync.updateYjrPosition = orig_update
@@ -769,7 +769,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(100, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("complete", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -790,7 +790,7 @@ describe("ReadingStateSync", function()
 
             local ok = sync:syncToKindle("B001", "/path/book.kfx", ds)
             assert.is_true(ok)
-            assert.equals(42, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
             assert.equals("reading", write_log[1].status)
 
             restoreWriteKindleState(sync, orig_write)
@@ -988,7 +988,7 @@ describe("ReadingStateSync", function()
             local result = sync:syncBidirectional("B007N6JEII", "/mnt/us/documents/Throne of Glass_B007N6JEII.kfx", ds)
             assert.is_true(result)
             assert.equals(1, #write_log)
-            assert.equals(85, write_log[1].percent)
+            assert.equals(37, write_log[1].percent)
 
             restoreReadKindleState(sync, orig_read)
             restoreWriteKindleState(sync, orig_write)
