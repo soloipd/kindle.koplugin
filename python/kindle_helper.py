@@ -705,6 +705,34 @@ def cmd_translate_position(args):
         }, code=1)
 
 
+def cmd_translate_positions(args):
+    try:
+        with open(args.request, "r", encoding="utf-8") as request_file:
+            requests = json.load(request_file)
+        if not isinstance(requests, list) or len(requests) > 1000:
+            raise ValueError("invalid position request list")
+        translated = []
+        for request in requests:
+            if not isinstance(request, dict):
+                raise ValueError("invalid position request")
+            translated.append(translate_pair(
+                args.epub,
+                request.get("start"),
+                request.get("end"),
+            ))
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            "positions": translated,
+        })
+    except (OSError, zipfile.BadZipFile, PositionTranslationError, ValueError, json.JSONDecodeError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="kindle-helper")
     sub = parser.add_subparsers(dest="command")
@@ -749,6 +777,10 @@ def main():
     p_translate.add_argument("--start", required=True)
     p_translate.add_argument("--end", required=True)
 
+    p_translates = sub.add_parser("translate-positions")
+    p_translates.add_argument("--epub", required=True)
+    p_translates.add_argument("--request", required=True)
+
     # extract-key
     p_extract = sub.add_parser("extract-key")
     p_extract.add_argument("--input", required=True,
@@ -772,6 +804,7 @@ def main():
         "drm-init": cmd_drm_init,
         "position": cmd_position,
         "translate-position": cmd_translate_position,
+        "translate-positions": cmd_translate_positions,
         "extract-key": cmd_extract_key,
     }
 
