@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-arm-helper:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
         with:
@@ -22,8 +22,18 @@ jobs:
         with:
           platforms: arm
 
+      - uses: docker/setup-buildx-action@v4
+
       - name: Build ARMv7 helper image
-        run: docker build --platform linux/arm/v7 --file .github/Dockerfile.arm --tag kindle-helper-arm .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .github/Dockerfile.arm
+          platforms: linux/arm/v7
+          load: true
+          tags: kindle-helper-arm
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Extract helper bundle
         run: |
