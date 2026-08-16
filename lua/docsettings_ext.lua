@@ -89,12 +89,12 @@ function DocSettingsExt:migrateLegacySidecar(book, canonical, preferred_doc_path
     end
 
     if not util.makePath(preferred_dir) then
-        logger.warn("KindlePlugin: failed to create canonical sidecar directory for", book.id)
+        logger.warn("KindlePlugin: failed to create canonical sidecar directory")
         return
     end
     if copyFileIfMissing(legacy_path, preferred_path) then
         copyFileIfMissing(legacy_path .. ".old", preferred_path .. ".old")
-        logger.info("KindlePlugin: migrated legacy virtual sidecar for", book.id)
+        logger.info("KindlePlugin: migrated a legacy virtual sidecar")
     end
 end
 

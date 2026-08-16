@@ -189,7 +189,7 @@ function KindleStateWriter._writeWithSQ3(SQ3, where_clause, where_value, percent
     pcall(function() conn:close() end)
 
     if not ok then
-        logger.warn("KindlePlugin: Error writing to cc.db:", result)
+        logger.warn("KindlePlugin: error writing to cc.db")
         return false, false
     end
 

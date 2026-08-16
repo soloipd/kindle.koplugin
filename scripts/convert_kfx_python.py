@@ -25,7 +25,7 @@ def main():
     epub_data = book.convert_to_epub()
     with open(args.output, "wb") as f:
         f.write(epub_data)
-    print(f"Converted {args.input} -> {args.output} ({len(epub_data)} bytes)")
+    print(f"Converted one book ({len(epub_data)} bytes)")
 
 
 if __name__ == "__main__":

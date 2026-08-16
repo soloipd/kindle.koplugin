@@ -298,7 +298,7 @@ def cmd_convert(args):
                     "version": VERSION,
                     "ok": False,
                     "code": "drm",
-                    "message": f"DRM decryption failed: {e}",
+                    "message": f"DRM decryption failed: {type(e).__name__}",
                 })
 
             # Write decrypted CONT as a KFX-zip for kfxlib
@@ -460,7 +460,7 @@ def cmd_decrypt(args):
         if page_key is None:
             print("decrypt: no cached page key found", file=sys.stderr)
         else:
-            print(f"decrypt: {e}", file=sys.stderr)
+            print(f"decrypt failed: {type(e).__name__}", file=sys.stderr)
         sys.exit(1)
 
     print(f"decrypted main container: {len(cont_data)} bytes", file=sys.stderr)
@@ -484,9 +484,12 @@ def cmd_decrypt(args):
                     try:
                         dec = _decrypt_drmion(blob, page_key)
                         entries.append((rel, dec))
-                        print(f"decrypted sidecar {rel}: {len(dec)} bytes", file=sys.stderr)
+                        print(f"decrypted one sidecar: {len(dec)} bytes", file=sys.stderr)
                     except Exception as e:
-                        print(f"skipping DRMION sidecar {rel}: {e}", file=sys.stderr)
+                        print(
+                            f"skipping one DRMION sidecar: {type(e).__name__}",
+                            file=sys.stderr,
+                        )
 
     # Write KFX-zip
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -494,7 +497,7 @@ def cmd_decrypt(args):
         for name, blob in entries:
             zf.writestr(name, blob)
 
-    print(f"wrote {output_path} with {len(entries)} entries", file=sys.stderr)
+    print(f"wrote converted archive with {len(entries)} entries", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

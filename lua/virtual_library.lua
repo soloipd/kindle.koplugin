@@ -301,16 +301,15 @@ function VirtualLibrary:resolveBookPath(book)
         return nil, "missing book"
     end
 
-    logger.info("KindlePlugin: resolveBookPath for", book.id,
-        "mode:", book.open_mode, "source:", book.source_path)
+    logger.info("KindlePlugin: resolving a virtual book")
 
     if book.open_mode == "blocked" then
-        logger.warn("KindlePlugin: book is blocked:", book.block_reason)
+        logger.warn("KindlePlugin: virtual book is blocked")
         return nil, book.block_reason or "unsupported_kfx_layout"
     end
 
     if book.open_mode == "direct" then
-        logger.info("KindlePlugin: direct open:", book.source_path)
+        logger.info("KindlePlugin: opening a direct virtual book")
         self:registerOpenAlias(book.source_path, book.virtual_path)
         return book.source_path
     end
@@ -324,12 +323,12 @@ function VirtualLibrary:resolveBookPath(book)
 
     local cached_path, err = self.cache_manager:ensureCachedEpub(book)
     if cached_path then
-        logger.info("KindlePlugin: resolved to cached EPUB:", cached_path)
+        logger.info("KindlePlugin: resolved to a cached EPUB")
         self:registerOpenAlias(cached_path, book.virtual_path)
         return cached_path
     end
 
-    logger.warn("KindlePlugin: resolveBookPath failed:", err or "unknown")
+    logger.warn("KindlePlugin: virtual book resolution failed")
     return nil, err or "conversion_failed"
 end
 

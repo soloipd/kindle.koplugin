@@ -104,7 +104,8 @@ class PageKeyValidationTests(unittest.TestCase):
                 valid, error = drm_init._validate_page_key(kfx_file.name, b"x" * 16)
 
         self.assertFalse(valid)
-        self.assertIn("bad padding", error)
+        self.assertEqual("page key rejected: ValueError", error)
+        self.assertNotIn(kfx_file.name, error)
 
     def test_per_book_extraction_does_not_cache_rejected_key(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -124,7 +125,10 @@ class PageKeyValidationTests(unittest.TestCase):
                 result = drm_init.extract_book_key(kfx_path, tmpdir, tmpdir)
 
             self.assertFalse(result["ok"])
-            self.assertIn("rejected", result["message"])
+            self.assertIn("primary extractor failed", result["message"])
+            self.assertIn("native fallback failed", result["message"])
+            self.assertNotIn(kfx_path, result["message"])
+            self.assertNotIn(voucher_path, result["message"])
             self.assertFalse(os.path.exists(os.path.join(tmpdir, "drm_keys.json")))
 
 

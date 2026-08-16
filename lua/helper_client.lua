@@ -44,14 +44,14 @@ function HelperClient:_run(args)
     end
 
     if not self:binaryExists() then
-        logger.warn("KindlePlugin: kindle-helper binary not found at", self:getBinaryPath())
+        logger.warn("KindlePlugin: kindle-helper binary was not found")
         return nil, "kindle-helper binary not found at " .. self:getBinaryPath()
     end
 
     -- Capture stdout (JSON) cleanly; redirect stderr to temp file for debug
     local tmp_stderr = os.tmpname()
     local command = util.shell_escape(args) .. " 2>" .. util.shell_escape({tmp_stderr})
-    logger.dbg("KindlePlugin: running helper:", util.shell_escape(args))
+    logger.dbg("KindlePlugin: running helper command")
     local handle = io.popen(command)
     if not handle then
         os.remove(tmp_stderr)
@@ -68,7 +68,7 @@ function HelperClient:_run(args)
         local stderr_output = stderr_handle:read("*a") or ""
         stderr_handle:close()
         if stderr_output ~= "" then
-            logger.dbg("KindlePlugin: helper stderr:", stderr_output:sub(1, 500))
+            logger.dbg("KindlePlugin: helper wrote diagnostic stderr")
         end
     end
     os.remove(tmp_stderr)
@@ -77,7 +77,7 @@ function HelperClient:_run(args)
 
     local ok, decoded = pcall(json.decode, output)
     if not ok then
-        logger.warn("KindlePlugin: failed to decode helper JSON, raw output:", output:sub(1, 200))
+        logger.warn("KindlePlugin: failed to decode helper JSON")
         return nil, "invalid helper JSON"
     end
 
@@ -85,7 +85,7 @@ function HelperClient:_run(args)
 end
 
 function HelperClient:scan(root)
-    logger.info("KindlePlugin: scanning root:", root)
+    logger.info("KindlePlugin: scanning the configured documents root")
     local result, err = self:_run({
         self:getBinaryPath(),
         "scan",
@@ -96,13 +96,13 @@ function HelperClient:scan(root)
         local book_count = result.books and #result.books or 0
         logger.info("KindlePlugin: scan found", book_count, "books")
     else
-        logger.warn("KindlePlugin: scan failed:", err)
+        logger.warn("KindlePlugin: scan failed")
     end
     return result, err
 end
 
 function HelperClient:convert(input_path, output_path)
-    logger.info("KindlePlugin: converting", input_path, "->", output_path)
+    logger.info("KindlePlugin: converting one book")
     local result, err = self:_run({
         self:getBinaryPath(),
         "convert",
@@ -115,12 +115,12 @@ function HelperClient:convert(input_path, output_path)
     })
     if result then
         if result.ok then
-            logger.info("KindlePlugin: conversion succeeded:", result.output_path)
+            logger.info("KindlePlugin: conversion succeeded")
         else
-            logger.warn("KindlePlugin: conversion failed:", result.code, result.message)
+            logger.warn("KindlePlugin: conversion failed")
         end
     else
-        logger.warn("KindlePlugin: convert failed:", err)
+        logger.warn("KindlePlugin: conversion command failed")
     end
     return result, err
 end
@@ -137,7 +137,7 @@ function HelperClient:position(yjr_path, old_percent, new_percent)
         if result.ok then
             logger.info("KindlePlugin: position update succeeded, erl:", result.erl)
         else
-            logger.warn("KindlePlugin: position update failed:", result.message)
+            logger.warn("KindlePlugin: position update failed")
         end
     end
     return result, err
@@ -248,7 +248,7 @@ function HelperClient:saveNativeProgress(asin, native_path, position)
     then
         return false, result_error or "native progress result mismatch"
     end
-    logger.info("KindlePlugin: authoritative native progress saved:", asin, position.pid)
+    logger.info("KindlePlugin: authoritative native progress saved")
     return true, nil, native_percent, {
         long = values.long_position,
         pid = tonumber(values.saved_short),
@@ -301,7 +301,7 @@ end
 function HelperClient:drmInit()
     local root = self.settings.documents_root or "/mnt/us/documents"
     local cache_dir = self.settings.cache_dir or ""
-    logger.info("KindlePlugin: running drm-init on root:", root, "cache:", cache_dir)
+    logger.info("KindlePlugin: running DRM initialization")
     local result, err = self:_run({
         self:getBinaryPath(),
         "drm-init",
@@ -314,10 +314,10 @@ function HelperClient:drmInit()
         if result.ok then
             logger.info("KindlePlugin: drm-init succeeded, books:", result.books_found, "keys:", result.keys_found)
         else
-            logger.warn("KindlePlugin: drm-init failed:", result.message)
+            logger.warn("KindlePlugin: DRM initialization failed")
         end
     else
-        logger.warn("KindlePlugin: drm-init failed:", err)
+        logger.warn("KindlePlugin: DRM initialization command failed")
     end
     return result, err
 end
@@ -328,7 +328,7 @@ end
 --- @return string|nil: Error message if result is nil.
 function HelperClient:extractBookKey(kfx_path)
     local cache_dir = self.settings.cache_dir or ""
-    logger.info("KindlePlugin: extracting key for", kfx_path)
+    logger.info("KindlePlugin: extracting one book key")
     local result, err = self:_run({
         self:getBinaryPath(),
         "extract-key",
@@ -339,12 +339,12 @@ function HelperClient:extractBookKey(kfx_path)
     })
     if result then
         if result.ok then
-            logger.info("KindlePlugin: key extracted for", result.book_id)
+            logger.info("KindlePlugin: book key extracted")
         else
-            logger.warn("KindlePlugin: key extraction failed:", result.message)
+            logger.warn("KindlePlugin: key extraction failed")
         end
     else
-        logger.warn("KindlePlugin: key extraction failed:", err)
+        logger.warn("KindlePlugin: key extraction command failed")
     end
     return result, err
 end
@@ -375,7 +375,7 @@ function HelperClient:extractCover(sidecar_dir, book_id)
     os.execute(util.shell_escape({ "mkdir", "-p", cache_dir }))
 
     -- Run the cover extraction
-    local result, err = self:_run({
+    local result = self:_run({
         self:getBinaryPath(),
         "cover",
         "--sdr-dir",
@@ -385,12 +385,11 @@ function HelperClient:extractCover(sidecar_dir, book_id)
     })
 
     if result and result.ok then
-        logger.info("KindlePlugin: cover extracted:", cover_path, "size:", result.size)
+        logger.info("KindlePlugin: cover extracted; bytes:", result.size or 0)
         return cover_path
     end
 
-    logger.dbg("KindlePlugin: no cover in sidecar:", sidecar_dir,
-        result and result.message or err or "unknown")
+    logger.dbg("KindlePlugin: no cover found in sidecar")
     return nil
 end
 

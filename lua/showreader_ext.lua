@@ -39,11 +39,11 @@ function ShowReaderExt:apply()
 
         file = virtual_file
 
-        logger.info("KindlePlugin: showReader intercepting virtual path:", file)
+        logger.info("KindlePlugin: showReader intercepted a virtual book")
 
         local book = virtual_library:getBook(file)
         if not book then
-            logger.warn("KindlePlugin: book not found for virtual path:", file)
+            logger.warn("KindlePlugin: virtual book mapping was not found")
             UIManager:show(InfoMessage:new({
                 text = "Book not found in Kindle library index.",
                 timeout = 3,
@@ -53,7 +53,7 @@ function ShowReaderExt:apply()
 
         if book.open_mode == "blocked" then
             local reason = virtual_library:getBlockedReasonText(book)
-            logger.warn("KindlePlugin: book is blocked:", reason)
+            logger.warn("KindlePlugin: virtual book is blocked")
             UIManager:show(InfoMessage:new({
                 text = reason,
                 timeout = 4,
@@ -78,7 +78,7 @@ function ShowReaderExt:apply()
         end
 
         if not real_file then
-            logger.warn("KindlePlugin: failed to resolve book:", err or "unknown")
+            logger.warn("KindlePlugin: virtual book resolution failed")
             UIManager:show(InfoMessage:new({
                 text = virtual_library:getBlockedReasonText({
                     block_reason = err or "conversion_failed",
@@ -88,15 +88,14 @@ function ShowReaderExt:apply()
             return
         end
 
-        logger.info("KindlePlugin: resolved virtual path to:", real_file)
+        logger.info("KindlePlugin: virtual reader path resolved")
 
         -- Sync reading progress FROM Kindle before opening (PULL)
         if reading_state_sync and reading_state_sync:isAutomaticSyncEnabled() then
             local cde_key = reading_state_sync:extractCdeKey(file)
             local source_path = book.source_path
             if cde_key or source_path then
-                logger.info("KindlePlugin: Syncing progress FROM Kindle before open:",
-                    "cde_key:", cde_key, "source_path:", source_path)
+                logger.info("KindlePlugin: syncing progress from Kindle before open")
                 -- Open doc_settings for the real file to update progress
                 local DocSettings = require("docsettings")
                 local doc_settings = DocSettings:open(real_file)

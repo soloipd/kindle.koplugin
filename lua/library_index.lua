@@ -44,11 +44,11 @@ function LibraryIndex:scan()
 
     if self.ccdb_scanner and self.ccdb_scanner:isAvailable() then
         logger.info("KindlePlugin: scanning library via cc.db")
-        local books, err = self.ccdb_scanner:scan()
+        local books = self.ccdb_scanner:scan()
         if books then
             return books
         end
-        logger.warn("KindlePlugin: cc.db scan failed:", err, "— falling back to Python scanner")
+        logger.warn("KindlePlugin: cc.db scan failed; using fallback scanner")
     end
 
     -- Fallback: Python helper file scanner
@@ -57,7 +57,7 @@ function LibraryIndex:scan()
     end
 
     local root = self.settings.documents_root or "/mnt/us/documents"
-    logger.info("KindlePlugin: scanning library via Python helper from:", root)
+    logger.info("KindlePlugin: scanning library via fallback helper")
     local result, err = self.helper_client:scan(root)
     if not result then
         return nil, err
@@ -81,7 +81,7 @@ function LibraryIndex:refresh(force)
 
     local books, err = self:scan()
     if not books then
-        logger.warn("KindlePlugin: library scan failed:", err)
+        logger.warn("KindlePlugin: library scan failed")
         return nil, err
     end
 
@@ -90,12 +90,7 @@ function LibraryIndex:refresh(force)
     self.loaded_at = now
     self.settings.last_scan_at = now
 
-    local modes = {}
-    for _, book in ipairs(self.books) do
-        local m = book.open_mode or "unknown"
-        modes[m] = (modes[m] or 0) + 1
-    end
-    logger.info("KindlePlugin: library index refreshed,", #self.books, "books, modes:", modes)
+    logger.info("KindlePlugin: library index refreshed; books:", #self.books)
 
     return self.books
 end

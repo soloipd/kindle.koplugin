@@ -116,7 +116,7 @@ def _validate_page_key(kfx_path, page_key):
         try:
             drmion.decrypt(data, page_key)
         except Exception as error:
-            return False, f"page key rejected by {path}: {error}"
+            return False, f"page key rejected: {type(error).__name__}"
 
     if checked == 0:
         return False, "no DRMION content found for page-key validation"
@@ -226,9 +226,17 @@ def _native_book_fallback(kfx_path, voucher_path, plugin_dir, cache_dir, serial,
             "extractor": "native",
         }
     except Exception as native_error:
+        primary_class = (
+            type(primary_error).__name__
+            if isinstance(primary_error, BaseException)
+            else "ExtractorError"
+        )
         return {
             "ok": False,
-            "message": f"{primary_error}; native fallback failed: {native_error}",
+            "message": (
+                f"primary extractor failed: {primary_class}; "
+                f"native fallback failed: {type(native_error).__name__}"
+            ),
         }
 
 
@@ -245,7 +253,11 @@ def _run_native_fallback(vouchers, plugin_dir, cache_dir, serial, primary_error)
             try:
                 page_key = _select_native_page_key(kfx_path, page_keys)
             except Exception as error:
-                print(f"drm-init: native key rejected for {kfx_path}: {error}", file=sys.stderr, flush=True)
+                print(
+                    f"drm-init: native key rejected: {type(error).__name__}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 continue
             _store_page_key(
                 cache,
@@ -268,8 +280,14 @@ def _run_native_fallback(vouchers, plugin_dir, cache_dir, serial, primary_error)
             "extractor": "native",
         }
     except Exception as native_error:
+        primary_class = (
+            type(primary_error).__name__
+            if isinstance(primary_error, BaseException)
+            else "ExtractorError"
+        )
         raise RuntimeError(
-            f"{primary_error}; native fallback failed: {native_error}"
+            f"primary extractor failed: {primary_class}; "
+            f"native fallback failed: {type(native_error).__name__}"
         ) from native_error
 
 
@@ -331,7 +349,7 @@ def extract_book_key(kfx_path, plugin_dir, cache_dir):
                 plugin_dir,
                 cache_dir,
                 serial,
-                f"page key extraction failed: {error}",
+                f"page key extraction failed: {type(error).__name__}",
             )
 
         valid, validation_error = _validate_page_key(kfx_path, page_key)
@@ -414,22 +432,26 @@ def run(documents_root, plugin_dir, cache_dir):
         for voucher_path in vouchers:
             voucher_key = _find_voucher_key(voucher_path, keys)
             if voucher_key is None:
-                print(f"drm-init: skipping {voucher_path}: no matching key", file=sys.stderr, flush=True)
+                print("drm-init: skipping voucher without matching key", file=sys.stderr, flush=True)
                 continue
 
             try:
                 page_key = _extract_page_key(voucher_path, voucher_key)
             except Exception as e:
-                print(f"drm-init: page key extraction failed for {voucher_path}: {e}", file=sys.stderr, flush=True)
+                print(
+                    f"drm-init: page key extraction failed: {type(e).__name__}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 continue
 
             kfx_path = _find_kfx_for_voucher(voucher_path)
             if not kfx_path:
-                print(f"drm-init: skipping {voucher_path}: adjacent KFX not found", file=sys.stderr, flush=True)
+                print("drm-init: skipping voucher without adjacent KFX", file=sys.stderr, flush=True)
                 continue
             valid, validation_error = _validate_page_key(kfx_path, page_key)
             if not valid:
-                print(f"drm-init: skipping {voucher_path}: {validation_error}", file=sys.stderr, flush=True)
+                print("drm-init: skipping voucher whose page key failed validation", file=sys.stderr, flush=True)
                 continue
 
             book_id = _derive_book_id(voucher_path)
@@ -439,7 +461,7 @@ def run(documents_root, plugin_dir, cache_dir):
                 new_is_tmp = "tmp_" in voucher_path
                 existing_is_tmp = "tmp_" in cache["books"][book_id].get("voucher_path", "")
                 if not existing_is_tmp and new_is_tmp:
-                    print(f"drm-init: skipping tmp voucher {voucher_path}", file=sys.stderr, flush=True)
+                    print("drm-init: skipping duplicate temporary voucher", file=sys.stderr, flush=True)
                     continue
 
             _store_page_key(

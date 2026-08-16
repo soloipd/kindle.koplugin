@@ -34,12 +34,7 @@ local function updateBookListCache(virtual_path, doc_settings)
     end
 
     local BookList = require("ui/widget/booklist")
-    logger.dbg(
-        "KindlePlugin: Updating BookList cache for virtual path:",
-        virtual_path,
-        "percent:",
-        percent_finished * 100
-    )
+    logger.dbg("KindlePlugin: updating virtual BookList percentage")
     BookList.setBookInfoCacheProperty(virtual_path, "percent_finished", percent_finished)
 end
 
@@ -71,7 +66,7 @@ function ReaderUIExt:apply(ReaderUI)
             return self.original_methods.showFileManager(reader_self, file, selected_files)
         end
 
-        logger.info("KindlePlugin: Navigating to virtual library for virtual path:", file)
+        logger.info("KindlePlugin: navigating to the virtual library")
         return self.original_methods.showFileManager(reader_self, file, selected_files)
     end
 
@@ -97,8 +92,7 @@ function ReaderUIExt:apply(ReaderUI)
                 local book = self.virtual_library:getBook(virtual_path)
                 local source_path = book and book.source_path
                 if cde_key or source_path then
-                    logger.info("KindlePlugin: Auto-syncing progress to Kindle on book close:",
-                        "cde_key:", cde_key, "source_path:", source_path)
+                    logger.info("KindlePlugin: auto-syncing progress on book close")
                     Trapper:wrap(function()
                         self.reading_state_sync:syncToKindleAutomatic(
                             cde_key,

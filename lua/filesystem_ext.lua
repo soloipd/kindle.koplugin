@@ -23,7 +23,7 @@ end
 local function createPatchedAttributesFunction(virtual_library, original_lfs_attributes)
     return function(filepath, attribute_name)
         if type(filepath) == "string" and virtual_library:isVirtualPath(filepath) then
-            logger.dbg("KindlePlugin: lfs.attributes intercepted virtual path:", filepath)
+            logger.dbg("KindlePlugin: lfs.attributes intercepted a virtual path")
 
             if filepath == "KINDLE_VIRTUAL://" or filepath == "KINDLE_VIRTUAL:///" then
                 logger.dbg("KindlePlugin: Returning directory attributes for virtual library root")
@@ -41,12 +41,12 @@ local function createPatchedAttributesFunction(virtual_library, original_lfs_att
 
             local real_path = virtual_library:getRealPath(filepath)
             if real_path then
-                logger.dbg("KindlePlugin: Redirecting to real path:", real_path)
+                logger.dbg("KindlePlugin: redirecting virtual filesystem lookup")
 
                 return original_lfs_attributes(real_path, attribute_name)
             end
 
-            logger.dbg("KindlePlugin: Virtual path has no real counterpart:", filepath)
+            logger.dbg("KindlePlugin: virtual path has no real counterpart")
 
             return nil
         end

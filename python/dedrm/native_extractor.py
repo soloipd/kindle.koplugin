@@ -52,11 +52,11 @@ def find_executable(plugin_dir=None, native_dir=None):
                 timeout=15,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
-            failures.append(f"{path}: {error}")
+            failures.append(type(error).__name__)
             continue
         if result.returncode == 0:
             return path
-        failures.append(f"{path}: exit {result.returncode}")
+        failures.append(f"native extractor exit {result.returncode}")
 
     detail = "; ".join(failures) if failures else "no native extractor binaries found"
     raise NativeExtractorUnavailable(detail)

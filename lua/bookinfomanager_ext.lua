@@ -95,18 +95,18 @@ function BookInfoManagerExt:apply(BookInfoManager)
             return orig_extract(bim_self, filepath, cover_specs)
         end
 
-        logger.info("KindlePlugin: extractBookInfo for virtual path:", filepath)
+        logger.info("KindlePlugin: extracting virtual book metadata")
 
         local book = vl:getBook(filepath)
         if not book then
-            logger.warn("KindlePlugin: book not found for virtual path:", filepath)
+            logger.warn("KindlePlugin: virtual metadata mapping was not found")
             return nil
         end
 
         -- For direct-mode books (AZW, PDF, etc.), let KOReader's native
         -- extraction handle them by passing the real source path.
         if book.open_mode == "direct" then
-            logger.info("KindlePlugin: delegating to native extraction for direct book:", book.source_path)
+            logger.info("KindlePlugin: delegating direct-book metadata extraction")
             return orig_extract(bim_self, book.source_path, cover_specs)
         end
 
@@ -118,7 +118,7 @@ function BookInfoManagerExt:apply(BookInfoManager)
         -- for the cheap fields, only open EPUB for cover image.
         local bookinfo = self:buildBookInfoFromScanAndEpub(filepath, book, cover_specs ~= nil)
         if not bookinfo then
-            logger.warn("KindlePlugin: failed to build bookinfo for:", filepath)
+            logger.warn("KindlePlugin: failed to build virtual book metadata")
             self:writeUnsupportedRow(filepath, "metadata_extraction_failed")
             return nil
         end
@@ -128,9 +128,7 @@ function BookInfoManagerExt:apply(BookInfoManager)
         bookinfo.cover_fetched = "Y"
         self:writeBookInfoToDb(filepath, bookinfo)
 
-        logger.info("KindlePlugin: wrote bookinfo for", filepath,
-            "title:", bookinfo.title, "authors:", bookinfo.authors,
-            "has_cover:", bookinfo.has_cover)
+        logger.info("KindlePlugin: virtual book metadata persisted")
 
         -- Return a truthy value so CoverBrowser knows extraction succeeded
         return true
@@ -225,7 +223,7 @@ function BookInfoManagerExt:buildBookInfoFromScanAndEpub(virtual_filepath, book,
             pcall(function() document:close() end)
             return bookinfo
         else
-            logger.warn("KindlePlugin: failed to open cached EPUB:", real_path)
+            logger.warn("KindlePlugin: failed to open cached EPUB")
         end
     end
 
@@ -251,7 +249,7 @@ end
 function BookInfoManagerExt.tryLoadKindleThumbnail(_, bookinfo, thumbnail_path)
     local attr = lfs.attributes(thumbnail_path, "mode")
     if attr ~= "file" then
-        logger.dbg("KindlePlugin: Kindle thumbnail not found:", thumbnail_path)
+        logger.dbg("KindlePlugin: Kindle thumbnail not found")
         return
     end
 
@@ -264,10 +262,10 @@ function BookInfoManagerExt.tryLoadKindleThumbnail(_, bookinfo, thumbnail_path)
         bookinfo.cover_h = cover_bb:getHeight()
         bookinfo.cover_sizetag = string.format("%dx%d", bookinfo.cover_w, bookinfo.cover_h)
         bookinfo.cover_fetched = "Y"
-        logger.info("KindlePlugin: loaded Kindle thumbnail:", thumbnail_path,
+        logger.info("KindlePlugin: loaded Kindle thumbnail dimensions:",
             bookinfo.cover_w, "x", bookinfo.cover_h)
     else
-        logger.dbg("KindlePlugin: failed to load Kindle thumbnail:", thumbnail_path)
+        logger.dbg("KindlePlugin: failed to load Kindle thumbnail")
     end
 end
 
@@ -302,7 +300,7 @@ function BookInfoManagerExt:tryExtractCoverFromSidecar(bookinfo, book)
         bookinfo.cover_h = cover_bb:getHeight()
         bookinfo.cover_sizetag = string.format("%dx%d", bookinfo.cover_w, bookinfo.cover_h)
         bookinfo.cover_fetched = "Y"
-        logger.info("KindlePlugin: extracted cover from sidecar:", cover_path,
+        logger.info("KindlePlugin: extracted sidecar cover dimensions:",
             bookinfo.cover_w, "x", bookinfo.cover_h)
     end
 end
@@ -343,15 +341,15 @@ function BookInfoManagerExt:buildBookInfoFromEpub(virtual_filepath, real_epub_pa
     end)
 
     if not ok or not document then
-        logger.warn("KindlePlugin: failed to open cached EPUB for metadata:", real_epub_path, ok, tostring(document))
+        logger.warn("KindlePlugin: failed to open cached EPUB for metadata")
         return bookinfo
     end
-    logger.info("KindlePlugin: opened EPUB for metadata:", real_epub_path)
+    logger.info("KindlePlugin: opened cached EPUB for metadata")
 
     -- Load metadata (not full render)
     if document.loadDocument then
-        local load_ok, load_err = pcall(function() document:loadDocument(false) end)
-        logger.info("KindlePlugin: loadDocument result:", load_ok, tostring(load_err))
+        local load_ok = pcall(function() document:loadDocument(false) end)
+        logger.info("KindlePlugin: metadata document load success:", load_ok)
     end
 
     local ok2, props = pcall(function()
@@ -359,9 +357,9 @@ function BookInfoManagerExt:buildBookInfoFromEpub(virtual_filepath, real_epub_pa
     end)
 
     if not ok2 then
-        logger.warn("KindlePlugin: getProps failed:", tostring(props))
+        logger.warn("KindlePlugin: metadata property extraction failed")
     elseif props then
-        logger.info("KindlePlugin: got props:", tostring(props.title), tostring(props.authors))
+        logger.info("KindlePlugin: metadata properties extracted")
         if next(props) then
             bookinfo.has_meta = "Y"
             for k, v in pairs(props) do
@@ -387,7 +385,7 @@ function BookInfoManagerExt:buildBookInfoFromEpub(virtual_filepath, real_epub_pa
             bookinfo.cover_sizetag = string.format("%dx%d", bookinfo.cover_w, bookinfo.cover_h)
             logger.info("KindlePlugin: got cover:", bookinfo.cover_w, "x", bookinfo.cover_h)
         else
-            logger.warn("KindlePlugin: cover extraction failed:", ok3, tostring(cover_bb))
+            logger.warn("KindlePlugin: cover extraction failed")
         end
     end
 
@@ -405,7 +403,7 @@ function BookInfoManagerExt:writeBookInfoToDb(filepath, bookinfo)
 
     local db_conn = SQ3.open(self.db_location)
     if not db_conn then
-        logger.warn("KindlePlugin: failed to open bookinfo database:", self.db_location)
+        logger.warn("KindlePlugin: failed to open bookinfo database")
         return false
     end
     db_conn:set_busy_timeout(5000)
@@ -469,7 +467,7 @@ function BookInfoManagerExt:writeBookInfoToDb(filepath, bookinfo)
     db_conn:close()
 
     if not ok then
-        logger.warn("KindlePlugin: failed to write bookinfo to database for:", filepath)
+        logger.warn("KindlePlugin: failed to write virtual bookinfo")
         return false
     end
 
@@ -601,8 +599,7 @@ function BookInfoManagerExt:clearStaleVirtualEntries(BookInfoManager)
     end
 
     db_conn:close()
-    logger.info("KindlePlugin: converter version changed", stored_version or "nil", "->", current_version,
-        "cleared all virtual bookinfo entries")
+    logger.info("KindlePlugin: converter version changed; cleared virtual bookinfo")
 end
 
 function BookInfoManagerExt:unapply(BookInfoManager)

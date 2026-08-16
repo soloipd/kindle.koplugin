@@ -82,9 +82,9 @@ end
 ---
 --- Reads state using ljsqlite3 (on-device, efficient).
 function KindleStateReader._readWithSQ3(SQ3, where_clause, where_value)
-    local conn, err = SQ3.open(CC_DB_PATH)
+    local conn = SQ3.open(CC_DB_PATH)
     if not conn then
-        logger.warn("KindlePlugin: Failed to open cc.db:", err)
+        logger.warn("KindlePlugin: failed to open cc.db")
         return false, nil
     end
 
@@ -129,7 +129,7 @@ function KindleStateReader._readWithSQ3(SQ3, where_clause, where_value)
     pcall(function() conn:close() end)
 
     if not ok then
-        logger.warn("KindlePlugin: Error reading cc.db:", result)
+        logger.warn("KindlePlugin: error reading cc.db")
         return false, nil
     end
 
@@ -251,7 +251,7 @@ function KindleStateReader._readAllWithSQ3(SQ3)
     pcall(function() conn:close() end)
 
     if not ok then
-        logger.warn("KindlePlugin: Error reading all from cc.db:", result)
+        logger.warn("KindlePlugin: error reading all rows from cc.db")
         return false, nil
     end
 

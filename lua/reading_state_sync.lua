@@ -25,9 +25,6 @@ local ReadingPositionState = require("lua/lib/reading_position_state")
 
 local ReadingStateSync = {}
 
---- Path to the Kindle content catalog database.
-local CC_DB_PATH = "/var/local/cc.db"
-
 ---
 --- Extracts book cdeKey (ASIN or PDOC hash) from virtual path.
 --- @param virtual_path string: Virtual path in format KINDLE_VIRTUAL://BOOKID/filename.
@@ -40,7 +37,7 @@ local function extractCdeKeyFromVirtualPath(virtual_path)
     -- Extract book ID from virtual path
     local book_id = virtual_path:match("^KINDLE_VIRTUAL://([^/]+)/")
     if book_id then
-        logger.dbg("KindlePlugin: Extracted book ID from virtual path:", book_id)
+        logger.dbg("KindlePlugin: extracted a virtual book identifier")
         return book_id
     end
 
@@ -59,7 +56,7 @@ local function extractCdeKeyFromPath(file_path)
     -- The cdeKey is always the last segment before the extension after underscore
     local key = file_path:match("_([A-Z0-9]+)%.%w+$")
     if key and #key >= 10 then
-        logger.dbg("KindlePlugin: Extracted cdeKey from path:", key)
+        logger.dbg("KindlePlugin: extracted a catalog identifier from a path")
         return key
     end
     return nil
@@ -84,7 +81,7 @@ local function extractCdeKeyFromDocPath(doc_settings)
     -- Try extracting ASIN from filename pattern like _B007N6JEII.kfx
     local asin = extractCdeKeyFromPath(doc_path)
     if asin then
-        logger.dbg("KindlePlugin: Extracted ASIN from doc_path:", asin)
+        logger.dbg("KindlePlugin: extracted a catalog identifier from document settings")
         return asin
     end
 
@@ -591,16 +588,16 @@ function ReadingStateSync:saveAuthoritativeNativePosition(cde_key, source_path, 
         return false
     end
 
-    local position, translate_error = self.helper_client:translatePosition(epub_path, xpointer)
+    local position = self.helper_client:translatePosition(epub_path, xpointer)
     if not position then
-        logger.warn("KindlePlugin: exact native position translation failed:", translate_error)
+        logger.warn("KindlePlugin: exact native position translation failed")
         return false
     end
-    local saved, save_error, native_percent, native_position = self.helper_client:saveNativeProgress(
+    local saved, _, native_percent, native_position = self.helper_client:saveNativeProgress(
         asin, source_path, position
     )
     if not saved then
-        logger.warn("KindlePlugin: exact native progress save failed:", save_error)
+        logger.warn("KindlePlugin: exact native progress save failed")
         return false
     end
     if type(native_percent) ~= "number" or native_percent < 0 or native_percent > 100 then
@@ -810,7 +807,7 @@ function ReadingStateSync:syncFromKindle(cde_key, source_path, doc_settings)
 
     -- Don't pull from Kindle if the book has never been opened there
     if kindle_state.kindle_status == 0 or kindle_state.percent_read == 0 then
-        logger.dbg("KindlePlugin: Skipping sync FROM Kindle - book unopened for:", cde_key)
+        logger.dbg("KindlePlugin: skipping pull for an unopened native book")
         return false
     end
 
@@ -819,11 +816,11 @@ function ReadingStateSync:syncFromKindle(cde_key, source_path, doc_settings)
     )
 
     local epub_path = doc_settings.data and doc_settings.data.doc_path
-    local exact_xpointer, position_error, native_position = self:getAuthoritativeKindleXPointer(
+    local exact_xpointer, _, native_position = self:getAuthoritativeKindleXPointer(
         cde_key, source_path, epub_path
     )
     if not exact_xpointer then
-        logger.warn("KindlePlugin: exact native progress pull failed:", position_error)
+        logger.warn("KindlePlugin: exact native progress pull failed")
         return false
     end
     local receipt = self:getPositionReceipt(cde_key, source_path)
@@ -903,9 +900,7 @@ function ReadingStateSync:syncToKindle(cde_key, source_path, doc_settings, epub_
         "KindlePlugin: Syncing TO Kindle - writing KOReader progress:",
         string.format("%.2f%%", kr_percent * 100),
         "timestamp:",
-        current_timestamp,
-        "source_path:",
-        source_path
+        current_timestamp
     )
 
     local native_percent, native_position = self:saveAuthoritativeNativePosition(
@@ -951,10 +946,10 @@ function ReadingStateSync:syncFromKindleAutomatic(
     -- A shelf percentage and cc.db timestamp are not authoritative positions.
     -- Compare the exact LPR with the last successfully reconciled coordinate;
     -- this detects native-reader movement even when catalog time is stale.
-    local exact_xpointer, position_error, native_position =
+    local exact_xpointer, _, native_position =
         self:getAuthoritativeKindleXPointer(cde_key, source_path, epub_path)
     if not exact_xpointer then
-        logger.warn("KindlePlugin: exact native progress pull failed:", position_error)
+        logger.warn("KindlePlugin: exact native progress pull failed")
         return false
     end
     local receipt = self:getPositionReceipt(cde_key, source_path)
@@ -992,7 +987,6 @@ function ReadingStateSync:syncFromKindleAutomatic(
         if model_decision.action == "no_op"
             or model_decision.action == "await_destination_readback"
         then
-            local receipt = self:getPositionReceipt(cde_key, source_path)
             self:repairCatalogFromReceipt(
                 cde_key, source_path, receipt, native_position, kindle_state)
             return false
@@ -1103,8 +1097,6 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
     local kr_percent = doc_settings:readSetting("percent_finished") or 0
     local summary = doc_settings:readSetting("summary") or {}
     local kr_status = summary.status or "reading"
-    local doc_path = doc_settings.data and doc_settings.data.doc_path
-    local kr_timestamp = getValidatedKOReaderTimestamp(doc_path)
     local close_timestamp = os.time()
 
     local kindle_state = self:readKindleState(cde_key, source_path) or {
@@ -1207,11 +1199,11 @@ function ReadingStateSync:executePullFromKindle(cde_key, source_path, doc_settin
     local sync_completed = false
     self:syncIfApproved(true, true, function()
         local epub_path = doc_settings.data and doc_settings.data.doc_path
-        local exact_xpointer, position_error, native_position = self:getAuthoritativeKindleXPointer(
+        local exact_xpointer, _, native_position = self:getAuthoritativeKindleXPointer(
             cde_key, source_path, epub_path
         )
         if not exact_xpointer then
-            logger.warn("KindlePlugin: exact native progress pull failed:", position_error)
+            logger.warn("KindlePlugin: exact native progress pull failed")
             return
         end
         local koreader_percent = kindle_state.percent_read / 100.0
@@ -1316,7 +1308,7 @@ function ReadingStateSync:syncBidirectional(cde_key, source_path, doc_settings)
     local kr_status = summary.status
 
     if SyncDecisionMaker.areBothSidesComplete(kindle_state, kr_percent, kr_status) then
-        logger.dbg("KindlePlugin: Both sides complete, skipping sync for:", cde_key or source_path)
+        logger.dbg("KindlePlugin: both readers complete; skipping sync")
         return false
     end
 
@@ -1342,12 +1334,12 @@ function ReadingStateSync:syncBook(book)
     local mapped_book = self.virtual_library and self.virtual_library:getBook(source_path)
     local cache_manager = self.virtual_library and self.virtual_library.cache_manager
     if not mapped_book or not cache_manager then
-        logger.dbg("KindlePlugin: manual sync skipped; no virtual mapping for", source_path)
+        logger.dbg("KindlePlugin: manual sync skipped; no virtual mapping")
         return false
     end
     local fresh, epub_path = cache_manager:isFresh(mapped_book)
     if not fresh then
-        logger.dbg("KindlePlugin: manual sync skipped; book has no fresh cached EPUB:", source_path)
+        logger.dbg("KindlePlugin: manual sync skipped; no fresh cached EPUB")
         return false
     end
 
@@ -1400,9 +1392,9 @@ function ReadingStateSync:syncAllBooks()
     end
 
     if self.virtual_library then
-        local mapped, map_error = self.virtual_library:buildMappings(false)
+        local mapped = self.virtual_library:buildMappings(false)
         if not mapped then
-            logger.warn("KindlePlugin: cannot build mappings for manual sync:", map_error)
+            logger.warn("KindlePlugin: cannot build mappings for manual sync")
             return 0
         end
     end

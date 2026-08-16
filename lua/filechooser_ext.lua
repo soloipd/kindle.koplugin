@@ -120,7 +120,7 @@ function FileChooserExt:showBookDialog(fc_self, item)
                         local BookInfoManager = require("bookinfomanager")
                         if BookInfoManager and BookInfoManager.deleteBookInfo then
                             BookInfoManager:deleteBookInfo(item.path)
-                            logger.info("KindlePlugin: cleared bookinfo for", item.path)
+                            logger.info("KindlePlugin: cleared stale virtual bookinfo")
                         end
                         -- Refresh the list so CoverBrowser re-extracts metadata
                         fc_self:updateItems(1, true)
@@ -170,7 +170,7 @@ function FileChooserExt:apply(FileChooser)
     FileManager.onPathChanged = FileManager.updateTitleBarPath
 
     local cache_dir = self.cache_manager and self.cache_manager:getCacheDir() or ""
-    logger.info("KindlePlugin: FileChooser cache_dir =", cache_dir)
+    logger.info("KindlePlugin: FileChooser cache directory configured")
 
     -- Patch init: when a NEW FileManager is created pointing at the cache
     -- directory (happens when reader closes and creates a fresh FileManager),

@@ -33,7 +33,7 @@ function DocumentExt:apply(DocumentRegistry)
 
     DocumentRegistry.hasProvider = function(dr_self, file, mimetype, include_aux)
         if self.virtual_library:isVirtualPath(file) then
-            logger.dbg("KindlePlugin: hasProvider virtual path:", file)
+            logger.dbg("KindlePlugin: hasProvider handled a virtual book")
             return true
         end
 
@@ -42,7 +42,7 @@ function DocumentExt:apply(DocumentRegistry)
 
     DocumentRegistry.getProvider = function(dr_self, file, include_aux)
         if self.virtual_library:isVirtualPath(file) then
-            logger.dbg("KindlePlugin: getProvider virtual path:", file)
+            logger.dbg("KindlePlugin: getProvider handled a virtual book")
             return require("document/credocument")
         end
 
@@ -55,11 +55,11 @@ function DocumentExt:apply(DocumentRegistry)
         end
 
         -- Virtual path — resolve to real file and open via original
-        logger.info("KindlePlugin: openDocument virtual path:", file)
+        logger.info("KindlePlugin: opening a virtual book")
 
         local book = self.virtual_library:getBook(file)
         if not book then
-            logger.warn("KindlePlugin: book not found for virtual path:", file)
+            logger.warn("KindlePlugin: virtual book mapping was not found")
             showFailure("Book entry is no longer available.")
             return nil
         end
@@ -72,14 +72,14 @@ function DocumentExt:apply(DocumentRegistry)
         -- Resolve to real file path (may trigger conversion/cache)
         local actual_file, err = self.virtual_library:resolveBookPath(book)
         if not actual_file then
-            logger.warn("KindlePlugin: failed to resolve book path:", err or "unknown")
+            logger.warn("KindlePlugin: virtual book resolution failed")
             showFailure(self.virtual_library:getBlockedReasonText({
                 block_reason = err or "conversion_failed",
             }))
             return nil
         end
 
-        logger.info("KindlePlugin: resolved virtual path to:", actual_file)
+        logger.info("KindlePlugin: virtual book resolved")
 
         if not provider then
             provider = require("document/credocument")
@@ -91,7 +91,7 @@ function DocumentExt:apply(DocumentRegistry)
         local doc = self.original_methods.openDocument(dr_self, actual_file, provider)
         if doc then
             doc.virtual_path = file
-            logger.info("KindlePlugin: document opened successfully:", file, "->", actual_file)
+            logger.info("KindlePlugin: virtual document opened successfully")
         end
 
         return doc
