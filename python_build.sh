@@ -3,7 +3,7 @@
 #
 # No compilation of Python. Downloads:
 #   1. CPython standalone (armv7) from astral-sh/python-build-standalone
-#   2. C extension wheels from PyPI (lxml) and piwheels (Pillow, pycryptodome)
+#   2. C extension wheels from PyPI/piwheels, with Pillow built on Bullseye
 #   3. Pure Python packages (beautifulsoup4)
 # Only Docker step: cross-compile tiny C wrapper + syscall shim (~30 seconds)
 #
@@ -41,6 +41,7 @@ PYTHON_BUILD_STANDALONE_TAG="20260414"
 CPYTHON_VERSION="3.11.15"
 LXML_VERSION="6.0.3"
 PILLOW_VERSION="12.2.0"
+PILLOW_BUILD_REVISION="bullseye1"
 PYCRYPTODOME_VERSION="3.9.9"
 SOUPSIEVE_VERSION="2.8.1"
 
@@ -65,6 +66,44 @@ build_arm_image() {
     fi
 }
 
+build_pillow_arm_assets() {
+    python_dist="$1"
+    asset_dir="$2"
+    if compgen -G "$asset_dir/[Pp]illow-*.whl" >/dev/null \
+        && [ -f "$asset_dir/.stamp" ]; then
+        return
+    fi
+
+    mkdir -p "$asset_dir"
+    docker run --rm --platform linux/arm/v7 \
+        -e "PILLOW_VERSION=$PILLOW_VERSION" \
+        -v "$(cd "$python_dist" && pwd):/python:ro" \
+        -v "$(cd "$asset_dir" && pwd):/out" \
+        arm32v7/debian:bullseye bash -c '
+set -e
+apt-get update >/dev/null
+apt-get install -y --no-install-recommends \
+    build-essential ca-certificates libfreetype6-dev libjpeg62-turbo-dev \
+    liblcms2-dev libopenjp2-7-dev libtiff-dev libwebp-dev libxcb1-dev \
+    zlib1g-dev >/dev/null
+/python/bin/python3.11 -m pip wheel --no-cache-dir --no-deps \
+    --no-binary=Pillow --wheel-dir /out "Pillow==$PILLOW_VERSION"
+mkdir -p /out/libs
+for lib in \
+    libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 \
+    libbsd.so.0 libdeflate.so.0 libfreetype.so.6 libjbig.so.0 \
+    libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 \
+    libopenjp2.so.7 libpng16.so.16 libtiff.so.5 libwebp.so.6 \
+    libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1
+do
+    cp -L /usr/lib/arm-linux-gnueabihf/$lib /out/libs/ 2>/dev/null \
+        || cp -L /lib/arm-linux-gnueabihf/$lib /out/libs/ 2>/dev/null \
+        || true
+done
+touch /out/.stamp
+'
+}
+
 echo "=== Kindle Helper Build (download-based) ==="
 echo "Python: CPython $CPYTHON_VERSION"
 echo "Version: $VERSION"
@@ -84,7 +123,7 @@ mkdir -p "$STAGING"
 # we skip downloading and installing — just copy from the cache.
 # ---------------------------------------------------------------------------
 CACHE_DIR="build-cache"
-CACHE_KEY="cpython-${CPYTHON_VERSION}+${PYTHON_BUILD_STANDALONE_TAG}_lxml-${LXML_VERSION}_pillow-${PILLOW_VERSION}_pycrypto-${PYCRYPTODOME_VERSION}"
+CACHE_KEY="cpython-${CPYTHON_VERSION}+${PYTHON_BUILD_STANDALONE_TAG}_lxml-${LXML_VERSION}_pillow-${PILLOW_VERSION}-${PILLOW_BUILD_REVISION}_pycrypto-${PYCRYPTODOME_VERSION}"
 CACHE_STAMP="$CACHE_DIR/$CACHE_KEY/.stamp"
 
 if [ -f "$CACHE_STAMP" ]; then
@@ -124,10 +163,13 @@ else
     }
     unzip -q -o /tmp/lxml.whl -d "$SITE_PACKAGES"
 
-    # Pillow — piwheels
-    echo "  Pillow $PILLOW_VERSION (piwheels)..."
-    curl -fSL -o /tmp/pillow.whl "https://www.piwheels.org/simple/pillow/pillow-${PILLOW_VERSION}-cp311-cp311-linux_armv7l.whl"
-    unzip -q -o /tmp/pillow.whl -d "$SITE_PACKAGES"
+    # Pillow — compile against Bullseye instead of bundling a piwheels wheel
+    # linked to a newer glibc. Kindle's /mnt/us is not the compatibility issue;
+    # every bundled ELF dependency must run on the firmware's older userspace.
+    echo "  Pillow $PILLOW_VERSION (Bullseye ARM build)..."
+    PILLOW_ASSET_DIR="$CACHE_DIR/pillow-${PILLOW_VERSION}-cp311-armv7-${PILLOW_BUILD_REVISION}"
+    build_pillow_arm_assets "$CACHE_DIST" "$PILLOW_ASSET_DIR"
+    unzip -q -o "$PILLOW_ASSET_DIR"/[Pp]illow-*.whl -d "$SITE_PACKAGES"
 
     # pycryptodome — piwheels (archive for older versions)
     echo "  pycryptodome $PYCRYPTODOME_VERSION (piwheels)..."
@@ -214,15 +256,12 @@ find "$DIST_DIR/lib/python3.11" -name "test" -type d -exec rm -rf {} + 2>/dev/nu
 # Strip debug symbols from the Python binary (27MB -> ~7MB)
 docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/bin:/mnt" arm32v7/gcc:12 strip /mnt/python3
 
-# Extract shared libs needed by Pillow (not present on Kindle)
-# Pillow links: libtiff, libjpeg, libopenjp2, libxcb, libz
+# Bundle the exact Bullseye runtime libraries used to compile Pillow.
 echo "  Bundling shared libs for Pillow..."
 mkdir -p "$DIST_DIR/lib/external"
-docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/lib/external:/out" arm32v7/gcc:12 bash -c '
-for lib in libLerc.so.4 libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 libbsd.so.0 libdeflate.so.0 libfreetype.so.6 libjbig.so.0 libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 libopenjp2.so.7 libpng16.so.16 libtiff.so.6 libwebp.so.7 libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1; do
-    cp -L /lib/arm-linux-gnueabihf/$lib /out/ 2>/dev/null || true
-done
-'
+PILLOW_ASSET_DIR="$CACHE_DIR/pillow-${PILLOW_VERSION}-cp311-armv7-${PILLOW_BUILD_REVISION}"
+build_pillow_arm_assets "$DIST_DIR" "$PILLOW_ASSET_DIR"
+cp -a "$PILLOW_ASSET_DIR/libs/." "$DIST_DIR/lib/external/"
 
 # lxml's Bookworm libraries require glibc 2.36. Kindle firmware in the field
 # includes 2.35 and older, so bundle the same ABI names from Bullseye instead.
@@ -311,10 +350,28 @@ test -f "$STAGING/dist/lib/external/libexslt.so.0"
 test -f "$STAGING/dist/lib/external/libicuuc.so.67"
 test -f "$STAGING/dist/lib/external/libicudata.so.67"
 test -f "$STAGING/dist/lib/external/libgcrypt.so.20"
+test -f "$STAGING/dist/lib/external/libtiff.so.5"
+test ! -f "$STAGING/dist/lib/external/libtiff.so.6"
 test -x "$STAGING/bin/sync-native-progress"
 test -f "$STAGING/bin/native-reading-progress-agent-v6.jar"
 test -f "$STAGING/bin/classes/AttachLauncher.class"
 test ! -d "$STAGING/dist/dist"
+
+# Exercise Pillow under the oldest supported build userspace. This catches a
+# newer GLIBC symbol in either the wheel or one of its copied dependencies.
+docker run --rm --platform linux/arm/v7 \
+    -v "$(cd "$STAGING/dist" && pwd):/runtime:ro" \
+    arm32v7/debian:bullseye bash -c '
+set -e
+export LD_LIBRARY_PATH=/runtime/lib/external
+/runtime/bin/python3 -c "from PIL import Image; assert Image.new(\"RGB\", (2, 2)).size == (2, 2)"
+if find /runtime/lib/python3.11/site-packages/PIL /runtime/lib/external \
+    -type f -name "*.so*" -exec readelf --version-info {} \; 2>/dev/null \
+    | grep -Eq "GLIBC_2\\.(3[2-9]|[4-9][0-9])"; then
+    echo "Pillow runtime requires glibc newer than Bullseye" >&2
+    exit 1
+fi
+'
 
 # Create ZIP
 ZIP_NAME="kindle-koplugin-${TARGET}.zip"
