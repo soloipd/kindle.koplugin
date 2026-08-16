@@ -18,12 +18,15 @@ local T = require("ffi/util").template
 local BookList = require("ui/widget/booklist")
 local Trapper = require("ui/trapper")
 local ffiUtil = require("ffi/util")
+local lfs = require("libs/libkoreader-lfs")
 local KindleStateReader = require("lua/lib/kindle_state_reader")
 local KindleStateWriter = require("lua/lib/kindle_state_writer")
 local SyncDecisionMaker = require("lua/lib/sync_decision_maker")
 local ReadingPositionState = require("lua/lib/reading_position_state")
 
 local ReadingStateSync = {}
+local GOODREADS_PROGRESS_DIR =
+    "/mnt/us/koreader/settings/goodreads_native_progress"
 
 ---
 --- Extracts book cdeKey (ASIN or PDOC hash) from virtual path.
@@ -97,6 +100,7 @@ function ReadingStateSync:new(helper_client)
         plugin = nil,
         sync_direction = nil,
         helper_client = helper_client,
+        goodreads_progress_dir = GOODREADS_PROGRESS_DIR,
     }
     setmetatable(o, self)
     self.__index = self
@@ -280,10 +284,50 @@ function ReadingStateSync:isPositionSourceOfTruthEnabled()
         and self.plugin.settings.enable_position_source_of_truth == true
 end
 
+--- Read the last percentage that the Goodreads companion confirmed as sent.
+--- The existing receipt contains one integer and its filesystem timestamp;
+--- neither plugin needs access to account credentials or book text.
+function ReadingStateSync:readGoodreadsProgress(cde_key, source_path)
+    local asin = receiptAsin(cde_key, source_path)
+    if not asin or type(self.goodreads_progress_dir) ~= "string" then
+        return nil
+    end
+    local path = self.goodreads_progress_dir .. "/" .. asin
+    local attributes = lfs.attributes(path)
+    local observed_at = attributes and tonumber(attributes.modification)
+    if not attributes or attributes.mode ~= "file" or not observed_at then
+        return nil
+    end
+    local file = io.open(path, "r")
+    if not file then return nil end
+    local line = file:read("*l")
+    file:close()
+    if type(line) ~= "string" or not line:match("^%d+$") then return nil end
+    local percent = tonumber(line)
+    if not percent or percent < 1 or percent > 100 then return nil end
+    return {
+        percent = percent,
+        observed_at = math.max(0, math.floor(observed_at)),
+        status = percent == 100 and "complete" or "reading",
+    }
+end
+
 local function saveModelIfChanged(sync, changed)
     if changed and sync.plugin and type(sync.plugin.saveSettings) == "function" then
         sync.plugin:saveSettings()
     end
+end
+
+function ReadingStateSync:observeGoodreadsPositionFact(
+    state, cde_key, source_path
+)
+    if not self:isPositionSourceOfTruthEnabled() or not state then return false end
+    local progress = self:readGoodreadsProgress(cde_key, source_path)
+    if not progress then return false end
+    local _, changed = storeModelObservation(
+        state, "goodreads", nil, progress.percent,
+        progress.observed_at, false, progress.status)
+    return changed
 end
 
 function ReadingStateSync:getCanonicalKOReaderPosition(epub_path, doc_settings)
@@ -339,6 +383,8 @@ function ReadingStateSync:observeOpenPositionFacts(
         tonumber(kindle_state and kindle_state.timestamp) or now,
         false, kindle_state and kindle_state.status)
     changed = changed or shelf_changed
+    changed = self:observeGoodreadsPositionFact(
+        state, cde_key, source_path) or changed
 
     if local_id then
         local summary = doc_settings:readSetting("summary") or {}
@@ -415,6 +461,8 @@ function ReadingStateSync:observeClosePositionFacts(
         tonumber(kindle_state and kindle_state.timestamp) or closed_at,
         false, kindle_state and kindle_state.status)
     changed = changed or shelf_changed
+    changed = self:observeGoodreadsPositionFact(
+        state, cde_key, source_path) or changed
     saveModelIfChanged(self, changed)
     if not state.observations.koreader_live or not state.observations.native then
         return nil

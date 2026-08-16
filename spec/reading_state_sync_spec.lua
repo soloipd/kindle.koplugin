@@ -101,6 +101,7 @@ describe("ReadingStateSync", function()
     local KindleStateWriter
     local ReadHistory
     local RealDocSettings
+    local io_mocker
     local originals = {}
 
     setup(function()
@@ -123,6 +124,7 @@ describe("ReadingStateSync", function()
 
     before_each(function()
         helper.before_each()
+        io_mocker = createIOOpenMocker()
         package.loaded["lua/reading_state_sync"] = nil
         package.loaded["lua/lib/sync_decision_maker"] = nil
         package.loaded["lua/lib/status_converter"] = nil
@@ -211,6 +213,7 @@ describe("ReadingStateSync", function()
     end)
 
     after_each(function()
+        io_mocker.uninstall()
         KindleStateReader.readByCdeKey = originals.reader_by_key
         KindleStateReader.readByUuid = originals.reader_by_uuid
         KindleStateReader.readByPath = originals.reader_by_path
@@ -424,6 +427,58 @@ describe("ReadingStateSync", function()
             assert.equals("koreader_live", state.acknowledged.source_engine)
             assert.equals("native", state.acknowledged.destination_engine)
             assert.equals(1, plugin.save_count)
+        end)
+
+        it("models a confirmed Goodreads receipt as display-only state", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            local receipt_path =
+                "/mnt/us/koreader/settings/goodreads_native_progress/B007N6JEII"
+            local lfs = helper.get_lfs()
+            lfs._setFileState(receipt_path, {
+                mode = "file",
+                modification = 1001,
+            })
+            io_mocker.install()
+            io_mocker.setMockFile(receipt_path, {
+                read = function() return "42" end,
+                close = function() end,
+            })
+
+            local state = sync:getPositionState("B007N6JEII", source_path)
+            assert.is_true(sync:observeGoodreadsPositionFact(
+                state, "B007N6JEII", source_path))
+            assert.equals(42, state.observations.goodreads.percent)
+            assert.is_nil(state.observations.goodreads.position_id)
+            assert.equals(1001, state.observations.goodreads.observed_at)
+            assert.equals("reading", state.observations.goodreads.status)
+            assert.equals(0, plugin.save_count)
+        end)
+
+        it("ignores malformed or non-file Goodreads receipts", function()
+            local sync = ReadingStateSync:new()
+            setupPluginSettings(sync)
+            local receipt_path =
+                "/mnt/us/koreader/settings/goodreads_native_progress/B007N6JEII"
+            local lfs = helper.get_lfs()
+            lfs._setFileState(receipt_path, {
+                mode = "directory",
+                modification = 1001,
+            })
+            assert.is_nil(sync:readGoodreadsProgress(
+                "B007N6JEII", source_path))
+
+            lfs._setFileState(receipt_path, {
+                mode = "file",
+                modification = 1001,
+            })
+            io_mocker.install()
+            io_mocker.setMockFile(receipt_path, {
+                read = function() return "private text" end,
+                close = function() end,
+            })
+            assert.is_nil(sync:readGoodreadsProgress(
+                "B007N6JEII", source_path))
         end)
 
         it("migrates an old exact receipt without inventing book text", function()
