@@ -1109,6 +1109,79 @@ describe("ReadingStateSync", function()
             restoreReadKindleState(sync, original_read)
         end)
 
+        it("should retry crash recovery after a plugin restart", function()
+            local baseline = {
+                long = "ATwFAACbAAAA", pid = 442741, percent = 40,
+            }
+            local recovered = {
+                long = "ATwFAACcAAAA", pid = 442750, percent = 55,
+            }
+            local client = {
+                translatePosition = function() return recovered end,
+            }
+            local first = ReadingStateSync:new(client)
+            first:setEnabled(true)
+            local plugin = setupPluginSettings(first)
+            assert.is_true(first:recordPositionReceipt(
+                "B007N6JEII", history_path, baseline,
+                "push", "reading", 1000))
+            ReadHistory.hist = {
+                { file = history_path, time = 1100 },
+            }
+            RealDocSettings:_setSidecarFile(history_path, true)
+            local failed = ReadingStateSync:new(client)
+            failed:setEnabled(true)
+            failed:setPlugin(plugin, SYNC_DIRECTION)
+            local failed_read = mockReadKindleState(failed, {
+                percent_read = 40, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            failed.getAuthoritativeKindleXPointer = function()
+                return "/body/DocFragment/body/p/text().40", nil, baseline
+            end
+            failed.saveAuthoritativeNativePosition = function()
+                return false
+            end
+            local ds = createMockDocSettings(history_path, {
+                percent_finished = 0.55,
+                last_xpointer = "/body/DocFragment/body/p/text().55",
+                summary = { status = "reading" },
+            })
+            assert.is_false(failed:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals("ATwFAACbAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+            restoreReadKindleState(failed, failed_read)
+
+            local restarted = ReadingStateSync:new(client)
+            restarted:setEnabled(true)
+            restarted:setPlugin(plugin, SYNC_DIRECTION)
+            local restarted_read = mockReadKindleState(restarted, {
+                percent_read = 40, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            local original_write, writes = mockWriteKindleState(restarted)
+            restarted.getAuthoritativeKindleXPointer = function()
+                return "/body/DocFragment/body/p/text().40", nil, baseline
+            end
+            restarted.saveAuthoritativeNativePosition = function()
+                return recovered.percent, recovered
+            end
+
+            assert.is_true(restarted:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(1, #writes)
+            assert.equals(55, writes[1].percent)
+            assert.equals("ATwFAACcAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+            assert.equals("koreader_persisted",
+                plugin.settings.reading_position_states.B007N6JEII
+                    .acknowledged.source_engine)
+
+            restoreReadKindleState(restarted, restarted_read)
+            restoreWriteKindleState(restarted, original_write)
+        end)
+
         it("should retry an unacknowledged rewind after a plugin restart", function()
             local native = {
                 long = "ATwFAACdAAAA", pid = 442760, percent = 80,

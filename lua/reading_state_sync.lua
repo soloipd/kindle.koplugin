@@ -413,8 +413,22 @@ function ReadingStateSync:observeOpenPositionFacts(
         }
     end
     if not state.observations.koreader_persisted then return nil end
-    return ReadingPositionState.resolve(
+    local to_koreader = ReadingPositionState.resolve(
         state, { "native", "koreader_persisted" }, "koreader_persisted")
+    if to_koreader.action == "conflict"
+        or (to_koreader.action == "apply"
+            and to_koreader.winner.engine == "native")
+    then
+        return to_koreader
+    end
+    local to_native = ReadingPositionState.resolve(
+        state, { "native", "koreader_persisted" }, "native")
+    if to_native.action == "apply"
+        and to_native.winner.engine == "koreader_persisted"
+    then
+        return to_native
+    end
+    return to_koreader
 end
 
 --- Observe close-time live KOReader intent and the current native fact before
@@ -474,7 +488,7 @@ end
 --- Record an exact position only after both the authoritative LPR operation
 --- and its corresponding KOReader/native state update have succeeded.
 function ReadingStateSync:recordPositionReceipt(
-    cde_key, source_path, position, direction, status, observed_at
+    cde_key, source_path, position, direction, status, observed_at, model_source
 )
     local asin = receiptAsin(cde_key, source_path)
     if not asin or not validNativePosition(position) or not self.plugin then
@@ -497,11 +511,14 @@ function ReadingStateSync:recordPositionReceipt(
     }
     if state then
         local source = direction == "push" and "koreader_live" or "native"
+        if direction == "push" and model_source == "koreader_persisted" then
+            source = model_source
+        end
         local destination = direction == "push" and "native" or "koreader_persisted"
         local position_id = canonicalPositionId(position)
         local source_observation = storeModelObservation(
             state, source, position_id, position.percent,
-            synced_at, direction == "push", status)
+            synced_at, source == "koreader_live", status)
         storeModelObservation(
             state, destination, position_id, position.percent,
             synced_at, false, status)
@@ -1010,7 +1027,9 @@ function ReadingStateSync:syncFromKindleAutomatic(
         return false
     end
     local receipt = self:getPositionReceipt(cde_key, source_path)
-    if sameReceiptPosition(receipt, native_position) then
+    if sameReceiptPosition(receipt, native_position)
+        and not self:isPositionSourceOfTruthEnabled()
+    then
         self:repairCatalogFromReceipt(
             cde_key, source_path, receipt, native_position, kindle_state
         )
@@ -1050,10 +1069,51 @@ function ReadingStateSync:syncFromKindleAutomatic(
         end
         if model_decision.action ~= "apply"
             or not model_decision.winner
-            or model_decision.winner.engine ~= "native"
         then
             return false
         end
+        if model_decision.winner.engine == "koreader_persisted" then
+            local expected_position = self:getCanonicalKOReaderPosition(
+                epub_path, doc_settings)
+            if canonicalPositionId(expected_position)
+                ~= model_decision.winner.position_id
+            then
+                logger.warn("KindlePlugin: saved position changed during open reconciliation")
+                return false
+            end
+            local sync_completed = false
+            local sync_details = {
+                book_title = self:getBookTitle(cde_key, doc_settings),
+                source_percent = kr_percent * 100,
+                dest_percent = kindle_state.percent_read,
+                source_time = kr_timestamp,
+                dest_time = kindle_state.timestamp,
+            }
+            self:syncIfApproved(false, true, function()
+                local recovery_at = os.time()
+                local native_percent, saved_position =
+                    self:saveAuthoritativeNativePosition(
+                        cde_key, source_path, epub_path, doc_settings)
+                if not native_percent
+                    or canonicalPositionId(saved_position)
+                        ~= model_decision.winner.position_id
+                then
+                    logger.warn("KindlePlugin: exact saved-position recovery failed")
+                    return
+                end
+                sync_completed = self:writeKindleState(
+                    cde_key, source_path, native_percent,
+                    recovery_at, kr_status)
+                if sync_completed then
+                    self:recordPositionReceipt(
+                        cde_key, source_path, saved_position,
+                        "push", kr_status, recovery_at,
+                        "koreader_persisted")
+                end
+            end, sync_details)
+            return sync_completed
+        end
+        if model_decision.winner.engine ~= "native" then return false end
     end
     local kindle_is_newer = model_decision ~= nil
         or receipt ~= nil
