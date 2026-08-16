@@ -189,6 +189,24 @@ local function storeModelObservation(
     then
         return previous, false
     end
+    if position_id ~= nil and previous and previous.position_id == position_id then
+        local changed = math.abs(previous.percent - normalized_percent) >= 0.0001
+            or previous.status ~= normalized_status
+        if changed then
+            -- Percentage and status are display/state hints. When the exact
+            -- coordinate did not move, update those hints without inventing a
+            -- newer page event that could defeat a real move in another reader.
+            previous.percent = normalized_percent
+            previous.status = normalized_status
+            if normalized_status == "complete" then
+                local completed_at = math.max(0,
+                    math.floor(tonumber(observed_at) or os.time()))
+                state.current_session.completed_at = math.max(
+                    state.current_session.completed_at or 0, completed_at)
+            end
+        end
+        return previous, changed
+    end
     local at = tonumber(observed_at) or os.time()
     at = math.max(0, math.floor(at))
     local observation = {

@@ -975,7 +975,9 @@ describe("ReadingStateSync", function()
                 return baseline.percent, baseline
             end
             local ds = createMockDocSettings("/cache/book.epub", {
-                percent_finished = 0.50,
+                -- KOReader may recalculate its display percent even though the
+                -- exact XPointer remains unchanged.
+                percent_finished = 0.51,
                 last_xpointer = "/body/DocFragment/body/p/text().50",
                 summary = { status = "reading" },
             })
