@@ -643,7 +643,10 @@ describe("ReadingStateSync", function()
             local ds = createMockDocSettings(history_path, { percent_finished = 0.5 })
 
             assert.is_true(sync:syncFromKindleAutomatic("B007N6JEII", history_path, ds))
-            assert.equals(0.2, ds:readSetting("percent_finished"))
+            -- Native and converted-EPUB percentages use different renderers.
+            -- The exact XPointer moves; KOReader keeps its own shelf percent
+            -- until its renderer opens that position.
+            assert.equals(0.5, ds:readSetting("percent_finished"))
             assert.equals(
                 "/body/DocFragment/body/p/text().0",
                 ds:readSetting("last_xpointer")
@@ -825,7 +828,7 @@ describe("ReadingStateSync", function()
 
             assert.is_true(sync:syncFromKindleAutomatic(
                 "B007N6JEII", history_path, ds, "/cache/book.epub"))
-            assert.equals(0.52, ds:readSetting("percent_finished"))
+            assert.equals(0.38, ds:readSetting("percent_finished"))
             assert.equals(
                 "/body/DocFragment/body/p/text().52",
                 ds:readSetting("last_xpointer")
@@ -1280,12 +1283,13 @@ describe("ReadingStateSync", function()
                     onGotoXPointer = function(_, xpointer)
                         applied = xpointer
                     end,
+                    getLastPercent = function() return 0.49 end,
                 },
             }
 
             assert.is_true(sync:syncColdStartReader(ui))
             assert.equals("/body/DocFragment/body/p/text().52", applied)
-            assert.equals(0.52, ds:readSetting("percent_finished"))
+            assert.equals(0.49, ds:readSetting("percent_finished"))
             assert.equals("ATwFAACcAAAA",
                 plugin.settings.position_sync_receipts.B007N6JEII.long)
 
@@ -1743,8 +1747,9 @@ describe("ReadingStateSync", function()
 
             local result = sync:syncBidirectional("B007N6JEII", "/mnt/us/documents/Throne of Glass_B007N6JEII.kfx", ds)
             assert.is_true(result)
-            -- Should have updated KOReader with Kindle's progress
-            assert.equals(0.75, ds:readSetting("percent_finished"))
+            -- Exact position moves, but KOReader's shelf percentage remains
+            -- renderer-owned until that position is opened.
+            assert.equals(0.30, ds:readSetting("percent_finished"))
             assert.equals("reading", ds:readSetting("summary").status)
 
             restoreReadKindleState(sync, orig)
@@ -2140,9 +2145,12 @@ describe("ReadingStateSync", function()
     -- applyKindleStateToKOReader
     -- ========================================================================
     describe("applyKindleStateToKOReader", function()
-        it("should convert Kindle percent (0-100) to KOReader percent (0-1)", function()
+        it("should preserve KOReader percent when no rendered percent is available", function()
             local sync = ReadingStateSync:new()
-            local ds = createMockDocSettings("/path/book.kfx")
+            local ds = createMockDocSettings("/path/book.kfx", {
+                percent_finished = 0.47,
+                last_percent = 0.47,
+            })
 
             sync:applyKindleStateToKOReader({
                 percent_read = 65,
@@ -2151,8 +2159,26 @@ describe("ReadingStateSync", function()
                 kindle_status = 1,
             }, ds, 0)
 
-            assert.equals(0.65, ds:readSetting("percent_finished"))
-            assert.equals(0.65, ds:readSetting("last_percent"))
+            assert.equals(0.47, ds:readSetting("percent_finished"))
+            assert.equals(0.47, ds:readSetting("last_percent"))
+        end)
+
+        it("should save a live KOReader-rendered percent after exact navigation", function()
+            local sync = ReadingStateSync:new()
+            local ds = createMockDocSettings("/path/book.kfx", {
+                percent_finished = 0.47,
+                last_percent = 0.47,
+            })
+
+            sync:applyKindleStateToKOReader({
+                percent_read = 65,
+                timestamp = 1762700000,
+                status = "reading",
+                kindle_status = 1,
+            }, ds, 0, 0.68)
+
+            assert.equals(0.68, ds:readSetting("percent_finished"))
+            assert.equals(0.68, ds:readSetting("last_percent"))
         end)
 
         it("should set complete status when percent >= 100", function()

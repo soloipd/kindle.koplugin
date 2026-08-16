@@ -47,12 +47,13 @@ and reverse-translates the native last-page-read position when returning to
 KOReader. If KOReader cold-starts directly into a mapped Bookshelf or History
 entry before plugins are loaded, a reader-ready catch-up applies the same exact
 position to the live reader; normal Kindle Library opens are not reconciled
-twice. The shelf percentage is updated only after the authoritative native save
-succeeds. KOReader and Kindle calculate percentages against different rendered
-content lengths, so the native shelf is written with Kindle's rendered
-percentage rather than copying KOReader's percentage. This keeps the native
-shelf and native reader consistent while the exact text position remains the
-cross-reader source of truth.
+twice. The native shelf percentage is updated only after the authoritative
+native save succeeds. KOReader and Kindle calculate percentages against
+different rendered content lengths, so each shelf keeps the percentage
+calculated by its own renderer. An exact pull moves KOReader by translated
+XPointer and never copies the native percentage into KOReader's Bookshelf. This
+keeps both shelf displays consistent with their readers while the exact text
+position remains the cross-reader source of truth.
 
 The plugin also stores a text-free reconciliation receipt containing only the
 last successfully synchronized KFX position. On the next open it compares the

@@ -925,9 +925,13 @@ end
 --- @param kindle_state table: Kindle reading state.
 --- @param doc_settings table: Document settings instance.
 --- @param kr_timestamp number: KOReader timestamp for logging.
+--- @param exact_koreader_percent number|nil: KOReader-rendered percentage after
+---   navigating to the translated XPointer. Native Kindle percentages are not
+---   interchangeable with KOReader percentages for a converted EPUB.
 --- @return boolean: True if state was applied.
-function ReadingStateSync:applyKindleStateToKOReader(kindle_state, doc_settings, kr_timestamp)
-    local koreader_percent = kindle_state.percent_read / 100.0
+function ReadingStateSync:applyKindleStateToKOReader(
+    kindle_state, doc_settings, kr_timestamp, exact_koreader_percent
+)
 
     logger.info(
         "KindlePlugin: Syncing FROM Kindle - Kindle is more recent:",
@@ -939,8 +943,18 @@ function ReadingStateSync:applyKindleStateToKOReader(kindle_state, doc_settings,
         kindle_state.percent_read
     )
 
-    doc_settings:saveSetting("percent_finished", koreader_percent)
-    doc_settings:saveSetting("last_percent", koreader_percent)
+    local rendered_percent = tonumber(exact_koreader_percent)
+    if rendered_percent then
+        rendered_percent = math.max(0, math.min(1, rendered_percent))
+        doc_settings:saveSetting("percent_finished", rendered_percent)
+        doc_settings:saveSetting("last_percent", rendered_percent)
+    elseif kindle_state.percent_read >= 100 then
+        -- Completion is renderer-independent. For every other exact pull,
+        -- preserve KOReader's own percentage until its renderer has opened the
+        -- translated XPointer and can calculate the correct shelf value.
+        doc_settings:saveSetting("percent_finished", 1.0)
+        doc_settings:saveSetting("last_percent", 1.0)
+    end
 
     local summary = doc_settings:readSetting("summary") or {}
     summary.status = kindle_state.status
@@ -1136,17 +1150,22 @@ function ReadingStateSync:syncFromKindleAutomatic(
                 cde_key, source_path, native_position, "pull", kindle_state.status)
             return
         end
+        local live_koreader_percent
         if apply_live_xpointer then
             local ok, applied = pcall(apply_live_xpointer, exact_xpointer)
             if not ok or applied == false then
                 logger.warn("KindlePlugin: cold-start live position apply failed")
                 return
             end
+            if type(applied) == "number" then
+                live_koreader_percent = applied
+            end
         end
         sync_completed = self:applyKindleStateToKOReader(
             kindle_state,
             doc_settings,
-            kr_timestamp
+            kr_timestamp,
+            live_koreader_percent
         )
         if sync_completed then
             doc_settings:saveSetting("last_xpointer", exact_xpointer)
@@ -1199,6 +1218,10 @@ function ReadingStateSync:syncColdStartReader(ui)
         epub_path,
         function(xpointer)
             ui.rolling:onGotoXPointer(xpointer)
+            if type(ui.rolling.getLastPercent) == "function" then
+                local percent = ui.rolling:getLastPercent()
+                if type(percent) == "number" then return percent end
+            end
             return true
         end
     )
@@ -1323,17 +1346,9 @@ function ReadingStateSync:executePullFromKindle(cde_key, source_path, doc_settin
             logger.warn("KindlePlugin: exact native progress pull failed")
             return
         end
-        local koreader_percent = kindle_state.percent_read / 100.0
         logger.info("KindlePlugin: Syncing FROM Kindle (PULL)")
-        doc_settings:saveSetting("percent_finished", koreader_percent)
-        doc_settings:saveSetting("last_percent", koreader_percent)
-
-        local summary = doc_settings:readSetting("summary") or {}
-        summary.status = kindle_state.status
-        if kindle_state.percent_read >= 100 then
-            summary.status = "complete"
-        end
-        doc_settings:saveSetting("summary", summary)
+        self:applyKindleStateToKOReader(
+            kindle_state, doc_settings, kr_timestamp)
         doc_settings:saveSetting("last_xpointer", exact_xpointer)
         doc_settings:flush()
         self:recordPositionReceipt(
