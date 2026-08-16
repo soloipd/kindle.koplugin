@@ -95,6 +95,46 @@ describe("ReadingPositionState", function()
         assert.equals("event_id_reused", detail)
     end)
 
+    it("serializes rapid same-second events in arrival order", function()
+        assert.is_true(State.observe(state,
+            observation("native", "AXMEAAANAAAA", 60, 120, "event-1", false)))
+        assert.is_true(State.observe(state,
+            observation("native", "AXMEAAANAAAB", 61, 120, "event-2", false)))
+        assert.equals("AXMEAAANAAAB", state.observations.native.position_id)
+        assert.equals(2, state.observations.native.sequence)
+    end)
+
+    it("bounds the retry journal without losing the latest observation", function()
+        for index = 1, 80 do
+            assert.is_true(State.observe(state, observation(
+                "native", "AXMEAAAN" .. string.format("%04d", index),
+                index, 100 + index, "event-" .. tostring(index), false)))
+        end
+        local count = 0
+        for _ in pairs(state.seen_events) do count = count + 1 end
+        assert.equals(64, count)
+        assert.equals(64, #state.seen_order)
+        assert.is_nil(state.seen_events["event-1"])
+        assert.is_not_nil(state.seen_events["event-80"])
+        assert.equals("AXMEAAAN0080", state.observations.native.position_id)
+        assert.is_true(State.isValid(state))
+    end)
+
+    it("rejects malformed persisted sessions and acknowledgements", function()
+        state.current_session.ordinal = "one"
+        assert.is_false(State.isValid(state))
+        state.current_session.ordinal = 1
+        state.acknowledged = {
+            position_id = "AXMEAAANAAAA",
+            percent = 50,
+            source_engine = "native",
+            destination_engine = "koreader_live",
+            session_id = "session-1",
+            acknowledged_at = "later",
+        }
+        assert.is_false(State.isValid(state))
+    end)
+
     it("rejects delayed events from an earlier session", function()
         assert.is_true(State.beginSession(state, "session-2", 200, "resume"))
         local delayed = observation("native", "AXMEAAANAAAA", 60, 210, "old", false)

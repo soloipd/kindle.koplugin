@@ -9,6 +9,7 @@ local ReadingPositionState = {}
 
 local SCHEMA_VERSION = 1
 local MAX_SESSIONS = 8
+local MAX_SEEN_EVENTS = 64
 local EXACT_ENGINES = {
     koreader_live = true,
     koreader_persisted = true,
@@ -91,18 +92,127 @@ function ReadingPositionState.new()
         session_history = {},
         observations = {},
         seen_events = {},
+        seen_order = {},
         next_sequence = 0,
         acknowledged = nil,
         last_decision = nil,
     }
 end
 
+local function validSession(session)
+    return type(session) == "table"
+        and safeId(session.id, 64)
+        and type(session.ordinal) == "number"
+        and session.ordinal >= 1
+        and session.ordinal == math.floor(session.ordinal)
+        and wholeTimestamp(session.started_at)
+        and SESSION_REASONS[session.reason] == true
+        and (session.completed_at == nil
+            or (wholeTimestamp(session.completed_at)
+                and session.completed_at >= session.started_at))
+end
+
+local function validStoredObservation(item, expected_engine, session)
+    if type(item) ~= "table"
+        or item.engine ~= expected_engine
+        or not ALL_ENGINES[item.engine]
+        or not safeId(item.event_id, 96)
+        or not safeId(item.session_id, 64)
+        or item.session_id ~= session.id
+        or item.session_ordinal ~= session.ordinal
+        or not wholeTimestamp(item.observed_at)
+        or item.observed_at < session.started_at
+        or not validPercent(item.percent)
+        or type(item.explicit) ~= "boolean"
+        or not STATUSES[item.status]
+        or type(item.sequence) ~= "number"
+        or item.sequence < 1
+        or item.sequence ~= math.floor(item.sequence)
+    then
+        return false
+    end
+    if EXACT_ENGINES[item.engine] then return safePosition(item.position_id) end
+    return DISPLAY_ENGINES[item.engine] and item.position_id == nil
+end
+
+local function validAcknowledgement(item, session)
+    return type(item) == "table"
+        and safePosition(item.position_id)
+        and validPercent(item.percent)
+        and EXACT_ENGINES[item.source_engine] == true
+        and EXACT_ENGINES[item.destination_engine] == true
+        and item.source_engine ~= item.destination_engine
+        and item.session_id == session.id
+        and wholeTimestamp(item.acknowledged_at)
+        and item.acknowledged_at >= session.started_at
+end
+
 function ReadingPositionState.isValid(state)
-    return type(state) == "table"
-        and state.version == SCHEMA_VERSION
-        and type(state.observations) == "table"
-        and type(state.seen_events) == "table"
-        and type(state.session_history) == "table"
+    if type(state) ~= "table"
+        or state.version ~= SCHEMA_VERSION
+        or type(state.observations) ~= "table"
+        or type(state.seen_events) ~= "table"
+        or type(state.seen_order) ~= "table"
+        or type(state.session_history) ~= "table"
+        or type(state.next_sequence) ~= "number"
+        or state.next_sequence < 0
+        or state.next_sequence ~= math.floor(state.next_sequence)
+        or (state.model_event_sequence ~= nil
+            and (type(state.model_event_sequence) ~= "number"
+                or state.model_event_sequence < 0
+                or state.model_event_sequence ~= math.floor(state.model_event_sequence)))
+        or #state.session_history > MAX_SESSIONS
+        or #state.seen_order > MAX_SEEN_EVENTS
+    then
+        return false
+    end
+    if state.current_session == nil then
+        return next(state.observations) == nil
+            and next(state.seen_events) == nil
+            and #state.session_history == 0
+            and #state.seen_order == 0
+    end
+    if not validSession(state.current_session) then return false end
+    if state.acknowledged ~= nil
+        and not validAcknowledgement(state.acknowledged, state.current_session)
+    then
+        return false
+    end
+    local previous_ordinal = 0
+    for _, session in ipairs(state.session_history) do
+        if not validSession(session)
+            or session.ordinal <= previous_ordinal
+            or session.ordinal >= state.current_session.ordinal
+        then
+            return false
+        end
+        previous_ordinal = session.ordinal
+    end
+    local observation_count = 0
+    for engine, item in pairs(state.observations) do
+        observation_count = observation_count + 1
+        if observation_count > 5
+            or not validStoredObservation(item, engine, state.current_session)
+        then
+            return false
+        end
+    end
+    local seen_count, ordered = 0, {}
+    for _, event_id in ipairs(state.seen_order) do
+        if not safeId(event_id, 96) or ordered[event_id] then return false end
+        ordered[event_id] = true
+    end
+    for event_id, item in pairs(state.seen_events) do
+        seen_count = seen_count + 1
+        if seen_count > MAX_SEEN_EVENTS
+            or not ordered[event_id]
+            or not validStoredObservation(item, item.engine, state.current_session)
+            or item.event_id ~= event_id
+        then
+            return false
+        end
+    end
+    return seen_count == #state.seen_order
 end
 
 function ReadingPositionState.beginSession(state, session_id, started_at, reason)
@@ -140,6 +250,7 @@ function ReadingPositionState.beginSession(state, session_id, started_at, reason
     }
     state.observations = {}
     state.seen_events = {}
+    state.seen_order = {}
     state.next_sequence = 0
     state.acknowledged = nil
     state.last_decision = nil
@@ -193,6 +304,11 @@ function ReadingPositionState.observe(state, observation)
     stored.sequence = state.next_sequence
     state.observations[stored.engine] = stored
     state.seen_events[stored.event_id] = shallowCopy(stored)
+    table.insert(state.seen_order, stored.event_id)
+    while #state.seen_order > MAX_SEEN_EVENTS do
+        local oldest = table.remove(state.seen_order, 1)
+        state.seen_events[oldest] = nil
+    end
     if stored.status == "complete" then
         session.completed_at = math.max(session.completed_at or 0, stored.observed_at)
     end

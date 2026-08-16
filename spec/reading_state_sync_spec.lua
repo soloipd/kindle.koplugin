@@ -425,6 +425,35 @@ describe("ReadingStateSync", function()
             assert.is_nil(state.source_path)
         end)
 
+        it("rebuilds corrupted model state from the last verified receipt", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            plugin.settings.position_sync_receipts = {
+                B007N6JEII = {
+                    long = "ATwFAACbAAAA", pid = 442741, percent = 38,
+                    direction = "pull", synced_at = 900,
+                },
+            }
+            plugin.settings.reading_position_states = {
+                B007N6JEII = {
+                    version = 1,
+                    current_session = { ordinal = "corrupt" },
+                    observations = "corrupt",
+                    seen_events = {},
+                    seen_order = {},
+                    session_history = {},
+                    next_sequence = 0,
+                },
+            }
+
+            local state = sync:getPositionState("B007N6JEII", source_path)
+            assert.equals("import", state.current_session.reason)
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.native.position_id)
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.koreader_persisted.position_id)
+        end)
+
         it("does not turn a retried receipt into a newer event", function()
             local sync = ReadingStateSync:new()
             local plugin = setupPluginSettings(sync)
