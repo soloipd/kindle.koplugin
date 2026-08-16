@@ -134,6 +134,7 @@ SITE_PACKAGES="$DIST_DIR/lib/python3.11/site-packages"
 echo "[3/5] Copying plugin source..."
 
 cp python/kindle_helper.py "$DIST_DIR/kindle_helper.py"
+cp python/annotation_position.py "$DIST_DIR/annotation_position.py"
 cp -r python/kfxlib/ "$DIST_DIR/kfxlib/"
 cp -r python/dedrm/ "$DIST_DIR/dedrm/"
 
@@ -245,6 +246,7 @@ echo "[5/5] Packaging..."
 
 # Copy Lua plugin files
 cp -r lua/ "$STAGING/lua/"
+cp -r bin/ "$STAGING/bin/"
 cp main.lua "$STAGING/"
 cp _meta.lua "$STAGING/"
 cp -r patches/ "$STAGING/patches/" 2>/dev/null || true
@@ -267,7 +269,11 @@ cp -a "$DIST_DIR/." "$STAGING/dist/"
 # Fail the build if the package no longer matches Dockerfile.wrapper's paths.
 test -x "$STAGING/dist/bin/python3"
 test -f "$STAGING/dist/kindle_helper.py"
+test -f "$STAGING/dist/annotation_position.py"
 test -f "$STAGING/dist/dedrm/native_extractor.py"
+test -x "$STAGING/bin/sync-native-progress"
+test -f "$STAGING/bin/native-reading-progress-agent-v6.jar"
+test -f "$STAGING/bin/classes/AttachLauncher.class"
 test ! -d "$STAGING/dist/dist"
 
 # Create ZIP
