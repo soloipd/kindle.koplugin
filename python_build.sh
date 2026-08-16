@@ -42,6 +42,28 @@ CPYTHON_VERSION="3.11.15"
 LXML_VERSION="6.0.3"
 PILLOW_VERSION="12.2.0"
 PYCRYPTODOME_VERSION="3.9.9"
+SOUPSIEVE_VERSION="2.8.1"
+
+build_arm_image() {
+    image_tag="$1"
+    dockerfile="$2"
+    if docker buildx version >/dev/null 2>&1; then
+        docker buildx build \
+            --platform linux/arm/v7 \
+            -t "$image_tag" \
+            -f "$dockerfile" \
+            --load \
+            .
+    else
+        # Docker Desktop installations without the optional buildx CLI still
+        # expose multi-platform support through the legacy build command.
+        docker build \
+            --platform linux/arm/v7 \
+            -t "$image_tag" \
+            -f "$dockerfile" \
+            .
+    fi
+}
 
 echo "=== Kindle Helper Build (download-based) ==="
 echo "Python: CPython $CPYTHON_VERSION"
@@ -128,6 +150,19 @@ fi
 DIST_DIR="$OUTPUT_DIR/dist"
 SITE_PACKAGES="$DIST_DIR/lib/python3.11/site-packages"
 
+# BeautifulSoup imports its CSS adapter during normal kfxlib startup. The
+# adapter warns on stderr when soupsieve is absent, which would corrupt the
+# helper's JSON-only process protocol even when CSS selectors are not used.
+SOUPSIEVE_WHEEL="$CACHE_DIR/soupsieve-${SOUPSIEVE_VERSION}-py3-none-any.whl"
+if [ ! -f "$SOUPSIEVE_WHEEL" ]; then
+    pip3 download \
+        --only-binary=:all: \
+        --no-deps \
+        --dest "$CACHE_DIR" \
+        "soupsieve==$SOUPSIEVE_VERSION"
+fi
+unzip -q -o "$SOUPSIEVE_WHEEL" -d "$SITE_PACKAGES"
+
 # ---------------------------------------------------------------------------
 # Step 3: Copy plugin Python source into dist
 # ---------------------------------------------------------------------------
@@ -184,10 +219,18 @@ docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/bin:/mnt" a
 echo "  Bundling shared libs for Pillow..."
 mkdir -p "$DIST_DIR/lib/external"
 docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/lib/external:/out" arm32v7/gcc:12 bash -c '
-for lib in libLerc.so.4 libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 libbsd.so.0 libdeflate.so.0 libexslt.so.0 libfreetype.so.6 libgcc_s.so.1 libgcrypt.so.20 libgpg-error.so.0 libicudata.so.72 libicuuc.so.72 libjbig.so.0 libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 libopenjp2.so.7 libpng16.so.16 libstdc++.so.6 libtiff.so.6 libwebp.so.7 libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libxml2.so.2 libxslt.so.1 libz.so.1 libzstd.so.1; do
+for lib in libLerc.so.4 libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 libbsd.so.0 libdeflate.so.0 libfreetype.so.6 libjbig.so.0 libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 libopenjp2.so.7 libpng16.so.16 libtiff.so.6 libwebp.so.7 libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1; do
     cp -L /lib/arm-linux-gnueabihf/$lib /out/ 2>/dev/null || true
 done
 '
+
+# lxml's Bookworm libraries require glibc 2.36. Kindle firmware in the field
+# includes 2.35 and older, so bundle the same ABI names from Bullseye instead.
+LXML_RUNTIME_TAG="kindle-lxml-runtime-builder"
+build_arm_image "$LXML_RUNTIME_TAG" .github/Dockerfile.lxml-runtime
+LXML_RUNTIME_CID=$(docker create "$LXML_RUNTIME_TAG")
+docker cp "$LXML_RUNTIME_CID:/out/." "$DIST_DIR/lib/external/"
+docker rm "$LXML_RUNTIME_CID"
 
 # Strip unnecessary Crypto modules
 rm -rf "$SITE_PACKAGES/Crypto/SelfTest"
@@ -205,27 +248,6 @@ rm -f "$SITE_PACKAGES/distutils-precedence.pth"
 # Step 4: Build C wrapper + syscall shim (tiny, ~30 seconds in Docker)
 # ---------------------------------------------------------------------------
 echo "[4/5] Building C wrapper..."
-
-build_arm_image() {
-    image_tag="$1"
-    dockerfile="$2"
-    if docker buildx version >/dev/null 2>&1; then
-        docker buildx build \
-            --platform linux/arm/v7 \
-            -t "$image_tag" \
-            -f "$dockerfile" \
-            --load \
-            .
-    else
-        # Docker Desktop installations without the optional buildx CLI still
-        # expose multi-platform support through the legacy build command.
-        docker build \
-            --platform linux/arm/v7 \
-            -t "$image_tag" \
-            -f "$dockerfile" \
-            .
-    fi
-}
 
 WRAPPER_TAG="kindle-wrapper-builder"
 
@@ -282,11 +304,12 @@ test -x "$STAGING/dist/bin/python3"
 test -f "$STAGING/dist/kindle_helper.py"
 test -f "$STAGING/dist/annotation_position.py"
 test -f "$STAGING/dist/dedrm/native_extractor.py"
+test -d "$STAGING/dist/lib/python3.11/site-packages/soupsieve"
 test -f "$STAGING/dist/lib/external/libxml2.so.2"
 test -f "$STAGING/dist/lib/external/libxslt.so.1"
 test -f "$STAGING/dist/lib/external/libexslt.so.0"
-test -f "$STAGING/dist/lib/external/libicuuc.so.72"
-test -f "$STAGING/dist/lib/external/libicudata.so.72"
+test -f "$STAGING/dist/lib/external/libicuuc.so.67"
+test -f "$STAGING/dist/lib/external/libicudata.so.67"
 test -f "$STAGING/dist/lib/external/libgcrypt.so.20"
 test -x "$STAGING/bin/sync-native-progress"
 test -f "$STAGING/bin/native-reading-progress-agent-v6.jar"
