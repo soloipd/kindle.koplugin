@@ -32,9 +32,11 @@ class ReadingProgressAgentBundleTests(unittest.TestCase):
         self.assertIn("libxml2.so.2", build_script)
         self.assertIn("libxslt.so.1", build_script)
         self.assertIn("libexslt.so.0", build_script)
-        self.assertIn("libicuuc.so.72", build_script)
-        self.assertIn("libicudata.so.72", build_script)
+        self.assertIn("Dockerfile.lxml-runtime", build_script)
+        self.assertIn("libicuuc.so.67", build_script)
+        self.assertIn("libicudata.so.67", build_script)
         self.assertIn("libgcrypt.so.20", build_script)
+        self.assertIn("soupsieve", build_script)
         self.assertIn("if docker buildx version", build_script)
         self.assertIn("docker build \\", build_script)
 
