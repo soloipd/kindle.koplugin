@@ -91,6 +91,7 @@ function ShowReaderExt:apply()
         logger.info("KindlePlugin: virtual reader path resolved")
 
         -- Sync reading progress FROM Kindle before opening (PULL)
+        local open_verification_id
         if reading_state_sync and reading_state_sync:isAutomaticSyncEnabled() then
             local cde_key = reading_state_sync:extractCdeKey(file)
             local source_path = book.source_path
@@ -100,11 +101,35 @@ function ShowReaderExt:apply()
                 local DocSettings = require("docsettings")
                 local doc_settings = DocSettings:open(real_file)
                 Trapper:wrap(function()
-                    reading_state_sync:syncFromKindleAutomatic(
+                    local _, verification_id =
+                        reading_state_sync:syncFromKindleAutomatic(
                         cde_key, source_path, doc_settings, real_file
                     )
+                    open_verification_id = verification_id
                 end)
                 doc_settings:flush()
+            end
+        end
+
+        if open_verification_id
+            and type(reading_state_sync.verifyOpenedKOReaderPosition) == "function"
+        then
+            local caller_after_open_callback = after_open_callback
+            after_open_callback = function(opened_reader)
+                local ok, verified = pcall(
+                    reading_state_sync.verifyOpenedKOReaderPosition,
+                    reading_state_sync,
+                    opened_reader,
+                    real_file,
+                    virtual_file,
+                    open_verification_id
+                )
+                if not ok or not verified then
+                    logger.warn("KindlePlugin: opened-reader destination verification failed")
+                end
+                if caller_after_open_callback then
+                    return caller_after_open_callback(opened_reader)
+                end
             end
         end
 

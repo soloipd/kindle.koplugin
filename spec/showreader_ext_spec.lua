@@ -32,10 +32,15 @@ describe("ShowReaderExt", function()
         helper.before_each()
         package.loaded["lua/showreader_ext"] = nil
         original_showReader_calls = {}
-        readerui_module.showReader = function(_, file, provider)
+        readerui_module.showReader = function(
+            _, file, provider, seamless, is_provider_forced, after_open_callback
+        )
             table.insert(original_showReader_calls, {
                 file = file,
                 provider = provider,
+                seamless = seamless,
+                is_provider_forced = is_provider_forced,
+                after_open_callback = after_open_callback,
             })
             return true
         end
@@ -242,6 +247,66 @@ describe("ShowReaderExt", function()
             assert.equals("/cache/book.epub", sync_tracker.epub_path)
             DocSettings.open = original_open
 
+            ShowReaderExt:unapply()
+        end)
+
+        it("should verify a staged pull only after the live reader opens", function()
+            local tracker = {
+                sync_calls = 0,
+                verify_calls = 0,
+                caller_calls = 0,
+            }
+            local mock_sync = {
+                isAutomaticSyncEnabled = function() return true end,
+                extractCdeKey = function(self, path)
+                    return path:match("^KINDLE_VIRTUAL://([A-Z0-9]+)/")
+                end,
+                syncFromKindleAutomatic = function()
+                    tracker.sync_calls = tracker.sync_calls + 1
+                    return true, 17
+                end,
+                verifyOpenedKOReaderPosition = function(
+                    self, opened_reader, epub_path, virtual_path, verification_id
+                )
+                    tracker.verify_calls = tracker.verify_calls + 1
+                    tracker.opened_reader = opened_reader
+                    tracker.epub_path = epub_path
+                    tracker.virtual_path = virtual_path
+                    tracker.verification_id = verification_id
+                    return true
+                end,
+            }
+            local DocSettings = require("docsettings")
+            local original_open = DocSettings.open
+            DocSettings.open = function()
+                return { flush = function() end }
+            end
+            local opened_reader = { ready = true }
+
+            ShowReaderExt:init(createMockVirtualLibrary(), mock_sync)
+            ShowReaderExt:apply()
+            readerui_module:showReader(
+                "KINDLE_VIRTUAL://B001/book.kfx",
+                nil, nil, nil,
+                function(reader)
+                    tracker.caller_calls = tracker.caller_calls + 1
+                    tracker.caller_reader = reader
+                end
+            )
+
+            assert.equals(1, tracker.sync_calls)
+            assert.equals(0, tracker.verify_calls)
+            assert.is_function(original_showReader_calls[1].after_open_callback)
+            original_showReader_calls[1].after_open_callback(opened_reader)
+            assert.equals(1, tracker.verify_calls)
+            assert.equals(1, tracker.caller_calls)
+            assert.equals(opened_reader, tracker.opened_reader)
+            assert.equals(opened_reader, tracker.caller_reader)
+            assert.equals("/cache/book.epub", tracker.epub_path)
+            assert.equals("KINDLE_VIRTUAL://B001/book.kfx", tracker.virtual_path)
+            assert.equals(17, tracker.verification_id)
+
+            DocSettings.open = original_open
             ShowReaderExt:unapply()
         end)
 

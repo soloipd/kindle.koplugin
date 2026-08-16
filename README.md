@@ -47,13 +47,16 @@ and reverse-translates the native last-page-read position when returning to
 KOReader. If KOReader cold-starts directly into a mapped Bookshelf or History
 entry before plugins are loaded, a reader-ready catch-up applies the same exact
 position to the live reader; normal Kindle Library opens are not reconciled
-twice. The native shelf percentage is updated only after the authoritative
-native save succeeds. KOReader and Kindle calculate percentages against
-different rendered content lengths, so each shelf keeps the percentage
-calculated by its own renderer. An exact pull moves KOReader by translated
-XPointer and never copies the native percentage into KOReader's Bookshelf. This
-keeps both shelf displays consistent with their readers while the exact text
-position remains the cross-reader source of truth.
+twice. A normal open first stages the translated XPointer, then waits for the
+live KOReader renderer to report the same exact location before recording a
+successful pull. Failed, stale, or superseded open callbacks remain
+unacknowledged and retry on a later open. The native shelf percentage is
+updated only after the authoritative native save succeeds. KOReader and Kindle
+calculate percentages against different rendered content lengths, so each
+shelf keeps the percentage calculated by its own renderer. An exact pull moves
+KOReader by translated XPointer and never copies the native percentage into
+KOReader's Bookshelf. This keeps both shelf displays consistent with their
+readers while the exact text position remains the cross-reader source of truth.
 
 The plugin also stores a text-free reconciliation receipt containing only the
 last successfully synchronized KFX position. On the next open it compares the
@@ -63,7 +66,8 @@ coordinate cannot overwrite newer KOReader progress. If the coordinate still
 matches but a stale native process has overwritten only the shelf percentage,
 the plugin repairs that display value from Kindle's verified rendered percent
 without moving either reader. A receipt is written only after the exact native
-save and shelf update both succeed.
+save is read back and the shelf update succeeds, or—when pulling in the other
+direction—after KOReader's live renderer confirms the exact destination.
 
 #### Experimental conflict-safe position model
 
@@ -92,6 +96,10 @@ still matches the last acknowledged position, the next mapped-book open retries
 the exact native save and repairs the shelf. Failed saves remain unacknowledged
 and are retried after a plugin restart. If both readers moved independently,
 the model fails closed and preserves both observations instead of guessing.
+Kindle and KOReader display percentages are stored as separate facts even when
+they refer to the same exact KFX coordinate. Open-time destination verification
+uses one bounded, memory-only, latest-wins token, so an older callback cannot
+acknowledge a newer open.
 
 The model stores coordinates, percentages, timestamps, statuses, counters, and
 bounded session identifiers only. It does not store titles, paths, annotation
