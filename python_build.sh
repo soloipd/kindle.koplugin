@@ -184,7 +184,7 @@ docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/bin:/mnt" a
 echo "  Bundling shared libs for Pillow..."
 mkdir -p "$DIST_DIR/lib/external"
 docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/lib/external:/out" arm32v7/gcc:12 bash -c '
-for lib in libLerc.so.4 libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 libbsd.so.0 libdeflate.so.0 libfreetype.so.6 libjbig.so.0 libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 libopenjp2.so.7 libpng16.so.16 libtiff.so.6 libwebp.so.7 libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1; do
+for lib in libLerc.so.4 libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 libbsd.so.0 libdeflate.so.0 libexslt.so.0 libfreetype.so.6 libgcc_s.so.1 libgcrypt.so.20 libgpg-error.so.0 libicudata.so.72 libicuuc.so.72 libjbig.so.0 libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 libopenjp2.so.7 libpng16.so.16 libstdc++.so.6 libtiff.so.6 libwebp.so.7 libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libxml2.so.2 libxslt.so.1 libz.so.1 libzstd.so.1; do
     cp -L /lib/arm-linux-gnueabihf/$lib /out/ 2>/dev/null || true
 done
 '
@@ -206,14 +206,30 @@ rm -f "$SITE_PACKAGES/distutils-precedence.pth"
 # ---------------------------------------------------------------------------
 echo "[4/5] Building C wrapper..."
 
+build_arm_image() {
+    image_tag="$1"
+    dockerfile="$2"
+    if docker buildx version >/dev/null 2>&1; then
+        docker buildx build \
+            --platform linux/arm/v7 \
+            -t "$image_tag" \
+            -f "$dockerfile" \
+            --load \
+            .
+    else
+        # Docker Desktop installations without the optional buildx CLI still
+        # expose multi-platform support through the legacy build command.
+        docker build \
+            --platform linux/arm/v7 \
+            -t "$image_tag" \
+            -f "$dockerfile" \
+            .
+    fi
+}
+
 WRAPPER_TAG="kindle-wrapper-builder"
 
-docker buildx build \
-    --platform linux/arm/v7 \
-    -t "$WRAPPER_TAG" \
-    -f .github/Dockerfile.wrapper \
-    --load \
-    .
+build_arm_image "$WRAPPER_TAG" .github/Dockerfile.wrapper
 
 CONTAINER_ID=$(docker create "$WRAPPER_TAG")
 docker cp "$CONTAINER_ID:/build/kindle-helper" "$OUTPUT_DIR/kindle-helper"
@@ -226,12 +242,7 @@ docker rm "$CONTAINER_ID"
 echo "  Building crypto_hook.so (old glibc)..."
 CRYPTO_HOOK_TAG="kindle-crypto-hook-builder"
 
-docker buildx build \
-    --platform linux/arm/v7 \
-    -t "$CRYPTO_HOOK_TAG" \
-    -f .github/Dockerfile.crypto_hook \
-    --load \
-    .
+build_arm_image "$CRYPTO_HOOK_TAG" .github/Dockerfile.crypto_hook
 
 CRYPTO_CID=$(docker create "$CRYPTO_HOOK_TAG")
 docker cp "$CRYPTO_CID:/build/crypto_hook.so" "$OUTPUT_DIR/crypto_hook.so"
@@ -271,6 +282,12 @@ test -x "$STAGING/dist/bin/python3"
 test -f "$STAGING/dist/kindle_helper.py"
 test -f "$STAGING/dist/annotation_position.py"
 test -f "$STAGING/dist/dedrm/native_extractor.py"
+test -f "$STAGING/dist/lib/external/libxml2.so.2"
+test -f "$STAGING/dist/lib/external/libxslt.so.1"
+test -f "$STAGING/dist/lib/external/libexslt.so.0"
+test -f "$STAGING/dist/lib/external/libicuuc.so.72"
+test -f "$STAGING/dist/lib/external/libicudata.so.72"
+test -f "$STAGING/dist/lib/external/libgcrypt.so.20"
 test -x "$STAGING/bin/sync-native-progress"
 test -f "$STAGING/bin/native-reading-progress-agent-v6.jar"
 test -f "$STAGING/bin/classes/AttachLauncher.class"

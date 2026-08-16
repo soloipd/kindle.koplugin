@@ -29,6 +29,14 @@ class ReadingProgressAgentBundleTests(unittest.TestCase):
             build_script,
         )
         self.assertIn('test -f "$STAGING/dist/annotation_position.py"', build_script)
+        self.assertIn("libxml2.so.2", build_script)
+        self.assertIn("libxslt.so.1", build_script)
+        self.assertIn("libexslt.so.0", build_script)
+        self.assertIn("libicuuc.so.72", build_script)
+        self.assertIn("libicudata.so.72", build_script)
+        self.assertIn("libgcrypt.so.20", build_script)
+        self.assertIn("if docker buildx version", build_script)
+        self.assertIn("docker build \\", build_script)
 
     def test_bundled_agent_targets_java_11_and_contains_durability_checks(self):
         with zipfile.ZipFile(AGENT_JAR) as bundle:
