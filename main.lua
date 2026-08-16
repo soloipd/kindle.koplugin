@@ -58,6 +58,7 @@ local default_settings = {
     drm_initialized = false,
     sync_reading_state = false,
     enable_auto_sync = true,
+    enable_position_source_of_truth = false,
     enable_sync_from_kindle = false,
     enable_sync_to_kindle = true,
     sync_from_kindle_newer = SYNC_DIRECTION.PROMPT,
@@ -444,6 +445,24 @@ function KindlePlugin:createSyncBehaviorMenuItem()
                 end,
                 callback = function()
                     self.settings.enable_auto_sync = not self.settings.enable_auto_sync
+                    self:saveSettings()
+                end,
+                separator = true,
+            },
+            {
+                text = _("Experimental conflict-safe position model"),
+                help_text = _(
+                    "Separately tracks exact KOReader and Kindle positions, "
+                    .. "acknowledgements, rewinds, rereads, and shelf display state. "
+                    .. "It stores coordinates and counts only. Disable this switch "
+                    .. "at any time to return to the legacy sync decision path."
+                ),
+                checked_func = function()
+                    return self.settings.enable_position_source_of_truth == true
+                end,
+                callback = function()
+                    self.settings.enable_position_source_of_truth =
+                        not self.settings.enable_position_source_of_truth
                     self:saveSettings()
                 end,
                 separator = true,

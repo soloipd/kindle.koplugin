@@ -274,6 +274,12 @@ function ReadingStateSync:getPositionState(cde_key, source_path)
     return state
 end
 
+function ReadingStateSync:isPositionSourceOfTruthEnabled()
+    return self.plugin ~= nil
+        and type(self.plugin.settings) == "table"
+        and self.plugin.settings.enable_position_source_of_truth == true
+end
+
 local function saveModelIfChanged(sync, changed)
     if changed and sync.plugin and type(sync.plugin.saveSettings) == "function" then
         sync.plugin:saveSettings()
@@ -302,6 +308,7 @@ function ReadingStateSync:observeOpenPositionFacts(
     cde_key, source_path, doc_settings, epub_path, kindle_state, native_position,
     kr_timestamp
 )
+    if not self:isPositionSourceOfTruthEnabled() then return nil end
     local state = self:getPositionState(cde_key, source_path)
     local native_id = canonicalPositionId(native_position)
     if not state or not native_id then return nil end
@@ -370,6 +377,7 @@ end
 function ReadingStateSync:observeClosePositionFacts(
     cde_key, source_path, doc_settings, epub_path, kindle_state, closed_at
 )
+    if not self:isPositionSourceOfTruthEnabled() then return nil end
     local state = self:getPositionState(cde_key, source_path)
     if not state then return nil end
     local changed = false
@@ -425,7 +433,8 @@ function ReadingStateSync:recordPositionReceipt(
         return false
     end
     local settings = self.plugin.settings
-    local state = self:getPositionState(cde_key, source_path)
+    local state = self:isPositionSourceOfTruthEnabled()
+        and self:getPositionState(cde_key, source_path) or nil
     if type(settings.position_sync_receipts) ~= "table" then
         settings.position_sync_receipts = {}
     end

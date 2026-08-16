@@ -50,6 +50,7 @@ describe("KindlePlugin", function()
             assert.is_true(instance.settings.enable_virtual_library)
             assert.is_false(instance.settings.drm_initialized)
             assert.is_false(instance.settings.sync_reading_state)
+            assert.is_false(instance.settings.enable_position_source_of_truth)
         end)
 
         it("should preserve existing settings over defaults", function()
@@ -166,6 +167,29 @@ describe("KindlePlugin", function()
             -- settings being wired. Test that loadSettings populates correctly.
             assert.is_not_nil(instance.settings.documents_root)
             assert.is_not_nil(instance.settings.cache_dir)
+        end)
+    end)
+
+    describe("position source of truth menu", function()
+        it("enables and disables the experimental model without a restart", function()
+            local instance = newPlugin(KindlePlugin)
+            instance.settings.enable_position_source_of_truth = false
+            local save_count = 0
+            instance.saveSettings = function()
+                save_count = save_count + 1
+            end
+
+            local menu = instance:createSyncBehaviorMenuItem()
+            local model_item = menu.sub_item_table[2]
+            assert.is_false(model_item.checked_func())
+
+            model_item.callback()
+            assert.is_true(instance.settings.enable_position_source_of_truth)
+            assert.is_true(model_item.checked_func())
+
+            model_item.callback()
+            assert.is_false(instance.settings.enable_position_source_of_truth)
+            assert.equals(2, save_count)
         end)
     end)
 

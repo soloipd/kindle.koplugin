@@ -39,6 +39,7 @@ local function setupPluginSettings(sync)
     local mock_plugin = {
         settings = {
             enable_auto_sync = true,
+            enable_position_source_of_truth = true,
             enable_sync_from_kindle = true,
             enable_sync_to_kindle = true,
             sync_from_kindle_newer = SYNC_DIRECTION.SILENT,
@@ -385,6 +386,25 @@ describe("ReadingStateSync", function()
 
     describe("persistent position source of truth", function()
         local source_path = "/mnt/us/documents/Book_B007N6JEII.kfx"
+
+        it("leaves the model untouched when the experimental switch is off", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            plugin.settings.enable_position_source_of_truth = false
+
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACbAAAA", pid = 442741, percent = 42 },
+                "push", "reading", 1000))
+
+            assert.is_not_nil(plugin.settings.position_sync_receipts.B007N6JEII)
+            assert.is_nil(plugin.settings.reading_position_states)
+            assert.is_nil(sync:observeOpenPositionFacts(
+                "B007N6JEII", source_path, nil, nil, nil,
+                { long = "ATwFAACbAAAA", pid = 442741, percent = 42 },
+                1001))
+            assert.is_nil(plugin.settings.reading_position_states)
+        end)
 
         it("records separately acknowledged KOReader, native, and shelf facts", function()
             local sync = ReadingStateSync:new()
