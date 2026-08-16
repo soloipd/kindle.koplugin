@@ -64,6 +64,40 @@ the plugin repairs that display value from Kindle's verified rendered percent
 without moving either reader. A receipt is written only after the exact native
 save and shelf update both succeed.
 
+#### Experimental conflict-safe position model
+
+Under **Sync behavior**, **Experimental conflict-safe position model** enables
+an opt-in source-of-truth model. It is off by default and can be disabled at any
+time to return immediately to the legacy decision path; no restart is needed.
+
+When enabled, the plugin tracks these facts separately:
+
+- KOReader's live exact position and last persisted exact position;
+- Kindle's exact native position;
+- the Kindle shelf percentage;
+- the last percentage successfully accepted by the optional Goodreads native
+  sync plugin; and
+- the last exact position acknowledged by both readers.
+
+Shelf and Goodreads percentages are display hints only. They can never select
+or move an exact page. Exact conflicts are resolved from the current reading
+session, event time, direction, explicit reader movement, and verified
+acknowledgements—not by choosing the highest percentage. This preserves
+intentional rewinds and starts a bounded new session when reading begins again
+after completion.
+
+If an interrupted close leaves a newer persisted KOReader page while Kindle
+still matches the last acknowledged position, the next mapped-book open retries
+the exact native save and repairs the shelf. Failed saves remain unacknowledged
+and are retried after a plugin restart. If both readers moved independently,
+the model fails closed and preserves both observations instead of guessing.
+
+The model stores coordinates, percentages, timestamps, statuses, counters, and
+bounded session identifiers only. It does not store titles, paths, annotation
+text, account data, or credentials in its state or diagnostics. The optional
+Goodreads observation reads its existing successful-progress receipt only;
+Goodreads is never treated as an exact-position authority.
+
 For annotation integrations, the bundled helper also provides bounded batch
 translation in both directions. `translate-positions` converts normalized
 KOReader XPointer ranges to exact KFX coordinates, while
