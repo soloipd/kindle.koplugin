@@ -91,6 +91,7 @@ function ReadingPositionState.new()
         session_history = {},
         observations = {},
         seen_events = {},
+        next_sequence = 0,
         acknowledged = nil,
         last_decision = nil,
     }
@@ -139,6 +140,7 @@ function ReadingPositionState.beginSession(state, session_id, started_at, reason
     }
     state.observations = {}
     state.seen_events = {}
+    state.next_sequence = 0
     state.acknowledged = nil
     state.last_decision = nil
     return true, "started"
@@ -187,11 +189,8 @@ function ReadingPositionState.observe(state, observation)
     if previous and stored.observed_at < previous.observed_at then
         return false, "stale_observation"
     end
-    if previous and stored.observed_at == previous.observed_at
-        and not sameObservation(previous, stored)
-    then
-        return false, "same_engine_time_conflict"
-    end
+    state.next_sequence = (tonumber(state.next_sequence) or 0) + 1
+    stored.sequence = state.next_sequence
     state.observations[stored.engine] = stored
     state.seen_events[stored.event_id] = shallowCopy(stored)
     if stored.status == "complete" then

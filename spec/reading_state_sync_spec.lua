@@ -383,6 +383,101 @@ describe("ReadingStateSync", function()
         end)
     end)
 
+    describe("persistent position source of truth", function()
+        local source_path = "/mnt/us/documents/Book_B007N6JEII.kfx"
+
+        it("records separately acknowledged KOReader, native, and shelf facts", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACbAAAA", pid = 442741, percent = 42 },
+                "push", "reading", 1000))
+
+            local state = plugin.settings.reading_position_states.B007N6JEII
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.koreader_live.position_id)
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.native.position_id)
+            assert.equals(42, state.observations.shelf.percent)
+            assert.is_nil(state.observations.shelf.position_id)
+            assert.equals("koreader_live", state.acknowledged.source_engine)
+            assert.equals("native", state.acknowledged.destination_engine)
+            assert.equals(1, plugin.save_count)
+        end)
+
+        it("migrates an old exact receipt without inventing book text", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            plugin.settings.position_sync_receipts = {
+                B007N6JEII = {
+                    long = "ATwFAACbAAAA", pid = 442741, percent = 38,
+                    direction = "pull", synced_at = 900,
+                },
+            }
+            local state = sync:getPositionState("B007N6JEII", source_path)
+            assert.equals("import", state.current_session.reason)
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.native.position_id)
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.koreader_persisted.position_id)
+            assert.is_nil(state.title)
+            assert.is_nil(state.source_path)
+        end)
+
+        it("does not turn a retried receipt into a newer event", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            local position = {
+                long = "ATwFAACbAAAA", pid = 442741, percent = 42,
+            }
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path, position,
+                "push", "reading", 1000))
+            local state = plugin.settings.reading_position_states.B007N6JEII
+            local sequence = state.model_event_sequence
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path, position,
+                "push", "reading", 1000))
+            assert.equals(sequence, state.model_event_sequence)
+        end)
+
+        it("opens a new reread session for a post-completion local rewind", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACzAAAA", pid = 442799, percent = 100 },
+                "push", "complete", 1000))
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACaAAAA", pid = 442700, percent = 5 },
+                "push", "reading", 1100))
+            local state = plugin.settings.reading_position_states.B007N6JEII
+            assert.equals(2, state.current_session.ordinal)
+            assert.equals("reread", state.current_session.reason)
+            assert.equals(1, #state.session_history)
+            assert.equals(5, state.observations.native.percent)
+        end)
+
+        it("accepts rapid same-second changes without reusing an event", function()
+            local sync = ReadingStateSync:new()
+            local plugin = setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACaAAAA", pid = 442700, percent = 10 },
+                "push", "reading", 1000))
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", source_path,
+                { long = "ATwFAACbAAAA", pid = 442741, percent = 11 },
+                "push", "reading", 1000))
+            local state = plugin.settings.reading_position_states.B007N6JEII
+            assert.equals("ATwFAACbAAAA:442741",
+                state.observations.koreader_live.position_id)
+            assert.is_true(state.observations.koreader_live.sequence > 1)
+        end)
+    end)
+
     describe("configured automatic sync", function()
         local history_path = "/mnt/us/documents/Throne of Glass_B007N6JEII.kfx"
 
@@ -633,7 +728,7 @@ describe("ReadingStateSync", function()
             )
             assert.equals("ATwFAACcAAAA",
                 plugin.settings.position_sync_receipts.B007N6JEII.long)
-            assert.equals(1, plugin.save_count)
+            assert.equals(2, plugin.save_count)
 
             restoreReadKindleState(sync, original_read)
             RealDocSettings:_clearSidecars()
@@ -744,7 +839,9 @@ describe("ReadingStateSync", function()
                 plugin.settings.position_sync_receipts.B007N6JEII.long)
             assert.equals("push",
                 plugin.settings.position_sync_receipts.B007N6JEII.direction)
-            assert.equals(1, plugin.save_count)
+            -- Persist the observed event before applying it, then persist the
+            -- successful acknowledgement/receipt.
+            assert.equals(2, plugin.save_count)
 
             restoreReadKindleState(sync, original_read)
             restoreWriteKindleState(sync, original_write)
@@ -775,9 +872,192 @@ describe("ReadingStateSync", function()
             assert.is_false(sync:syncToKindleAutomatic(
                 "B007N6JEII", history_path, ds, "/cache/book.epub"))
             assert.is_nil(plugin.settings.position_sync_receipts)
-            assert.equals(0, plugin.save_count)
+            -- The local event survives for retry, but no success receipt does.
+            assert.equals(1, plugin.save_count)
 
             restoreReadKindleState(sync, original_read)
+        end)
+
+        it("should push an intentional KOReader rewind instead of choosing the higher percent", function()
+            local native = {
+                long = "ATwFAACdAAAA", pid = 442760, percent = 80,
+            }
+            local rewound = {
+                long = "ATwFAACaAAAA", pid = 442700, percent = 35,
+            }
+            local client = {
+                translatePosition = function() return rewound end,
+                readNativeProgress = function() return native end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", history_path, native, "push", "reading", 1000))
+            local original_read = mockReadKindleState(sync, {
+                percent_read = 80, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            local original_write, writes = mockWriteKindleState(sync)
+            sync.saveAuthoritativeNativePosition = function()
+                return rewound.percent, rewound
+            end
+            local ds = createMockDocSettings("/cache/book.epub", {
+                percent_finished = 0.35,
+                last_xpointer = "/body/DocFragment/body/p/text().35",
+                summary = { status = "reading" },
+            })
+
+            assert.is_true(sync:syncToKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(1, #writes)
+            assert.equals(35, writes[1].percent)
+            assert.equals("ATwFAACaAAAA",
+                sync.plugin.settings.position_sync_receipts.B007N6JEII.long)
+
+            restoreReadKindleState(sync, original_read)
+            restoreWriteKindleState(sync, original_write)
+        end)
+
+        it("should preserve a changed native position when KOReader did not move", function()
+            local baseline = {
+                long = "ATwFAACbAAAA", pid = 442741, percent = 50,
+            }
+            local native = {
+                long = "ATwFAACdAAAA", pid = 442760, percent = 70,
+            }
+            local client = {
+                translatePosition = function() return baseline end,
+                readNativeProgress = function() return native end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", history_path, baseline, "push", "reading", 1000))
+            local original_read = mockReadKindleState(sync, {
+                percent_read = 70, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            local original_write, writes = mockWriteKindleState(sync)
+            local native_save_called = false
+            sync.saveAuthoritativeNativePosition = function()
+                native_save_called = true
+                return baseline.percent, baseline
+            end
+            local ds = createMockDocSettings("/cache/book.epub", {
+                percent_finished = 0.50,
+                last_xpointer = "/body/DocFragment/body/p/text().50",
+                summary = { status = "reading" },
+            })
+
+            assert.is_false(sync:syncToKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(0, #writes)
+            assert.is_false(native_save_called)
+
+            restoreReadKindleState(sync, original_read)
+            restoreWriteKindleState(sync, original_write)
+        end)
+
+        it("should fail closed when both readers diverged from the acknowledged position", function()
+            local baseline = {
+                long = "ATwFAACbAAAA", pid = 442741, percent = 50,
+            }
+            local local_position = {
+                long = "ATwFAACaAAAA", pid = 442700, percent = 40,
+            }
+            local native = {
+                long = "ATwFAACdAAAA", pid = 442760, percent = 70,
+            }
+            local client = {
+                translatePosition = function() return local_position end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            local plugin = setupPluginSettings(sync)
+            assert.is_true(sync:recordPositionReceipt(
+                "B007N6JEII", history_path, baseline, "push", "reading", 1000))
+            local original_read = mockReadKindleState(sync, {
+                percent_read = 70, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            sync.getAuthoritativeKindleXPointer = function()
+                return "/body/DocFragment/body/p/text().70", nil, native
+            end
+            local ds = createMockDocSettings(history_path, {
+                percent_finished = 0.40,
+                last_xpointer = "/body/DocFragment/body/p/text().40",
+                summary = { status = "reading" },
+            })
+
+            assert.is_false(sync:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(0.40, ds:readSetting("percent_finished"))
+            assert.equals("ATwFAACbAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+            assert.equals("both_readers_changed_since_acknowledgement",
+                plugin.settings.reading_position_states.B007N6JEII
+                    .last_open_conflict)
+
+            restoreReadKindleState(sync, original_read)
+        end)
+
+        it("should retry an unacknowledged rewind after a plugin restart", function()
+            local native = {
+                long = "ATwFAACdAAAA", pid = 442760, percent = 80,
+            }
+            local rewound = {
+                long = "ATwFAACaAAAA", pid = 442700, percent = 35,
+            }
+            local client = {
+                translatePosition = function() return rewound end,
+                readNativeProgress = function() return native end,
+            }
+            local first = ReadingStateSync:new(client)
+            first:setEnabled(true)
+            local plugin = setupPluginSettings(first)
+            assert.is_true(first:recordPositionReceipt(
+                "B007N6JEII", history_path, native, "push", "reading", 1000))
+            local first_read = mockReadKindleState(first, {
+                percent_read = 80, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            first.writeKindleState = function() return false end
+            first.saveAuthoritativeNativePosition = function()
+                return rewound.percent, rewound
+            end
+            local ds = createMockDocSettings("/cache/book.epub", {
+                percent_finished = 0.35,
+                last_xpointer = "/body/DocFragment/body/p/text().35",
+                summary = { status = "reading" },
+            })
+            assert.is_false(first:syncToKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals("ATwFAACdAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+            restoreReadKindleState(first, first_read)
+
+            local restarted = ReadingStateSync:new(client)
+            restarted:setEnabled(true)
+            restarted:setPlugin(plugin, SYNC_DIRECTION)
+            local second_read = mockReadKindleState(restarted, {
+                percent_read = 80, timestamp = 1000,
+                status = "reading", kindle_status = 1,
+            })
+            local original_write, writes = mockWriteKindleState(restarted)
+            restarted.saveAuthoritativeNativePosition = function()
+                return rewound.percent, rewound
+            end
+
+            assert.is_true(restarted:syncToKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(1, #writes)
+            assert.equals("ATwFAACaAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+
+            restoreReadKindleState(restarted, second_read)
+            restoreWriteKindleState(restarted, original_write)
         end)
 
         it("should reconcile a mapped EPUB opened during cold startup", function()
@@ -885,7 +1165,9 @@ describe("ReadingStateSync", function()
             assert.equals(0.38, ds:readSetting("percent_finished"))
             assert.equals("ATwFAACbAAAA",
                 plugin.settings.position_sync_receipts.B007N6JEII.long)
-            assert.equals(0, plugin.save_count)
+            -- The changed native fact survives for retry; the old receipt is
+            -- deliberately not replaced when live navigation fails.
+            assert.equals(1, plugin.save_count)
 
             restoreReadKindleState(sync, original_read)
             RealDocSettings:_clearSidecars()

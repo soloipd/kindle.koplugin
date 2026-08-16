@@ -21,6 +21,7 @@ local ffiUtil = require("ffi/util")
 local KindleStateReader = require("lua/lib/kindle_state_reader")
 local KindleStateWriter = require("lua/lib/kindle_state_writer")
 local SyncDecisionMaker = require("lua/lib/sync_decision_maker")
+local ReadingPositionState = require("lua/lib/reading_position_state")
 
 local ReadingStateSync = {}
 
@@ -140,6 +141,11 @@ local function validNativePosition(position)
         and position.pid == math.floor(position.pid)
 end
 
+local function canonicalPositionId(position)
+    if not validNativePosition(position) then return nil end
+    return position.long .. ":" .. tostring(position.pid)
+end
+
 --- Return the last exact native position reconciled by this plugin.
 --- Coordinates contain no book text and are stored in KOReader's atomic
 --- settings file, so they survive restarts without creating another sidecar.
@@ -154,24 +160,287 @@ function ReadingStateSync:getPositionReceipt(cde_key, source_path)
     return receipt
 end
 
+local function normalizedPositionStatus(status)
+    if status == "complete" or status == "finished" then return "complete" end
+    if status == "abandoned" or status == "dnf" then return "dnf" end
+    if status == "unread" or status == "new" then return "unread" end
+    return "reading"
+end
+
+local function modelEventId(state, engine)
+    local sequence = (tonumber(state.model_event_sequence) or 0) + 1
+    state.model_event_sequence = sequence
+    return string.format("%s-%d-%d", engine,
+        state.current_session.ordinal, sequence)
+end
+
+local function storeModelObservation(
+    state, engine, position_id, percent, observed_at, explicit, status
+)
+    local previous = state.observations[engine]
+    local normalized_percent = tonumber(percent)
+    if not normalized_percent then normalized_percent = 0 end
+    normalized_percent = math.max(0, math.min(100, normalized_percent))
+    local normalized_status = normalizedPositionStatus(status)
+    if previous
+        and previous.position_id == position_id
+        and math.abs(previous.percent - normalized_percent) < 0.0001
+        and previous.status == normalized_status
+    then
+        return previous, false
+    end
+    local at = tonumber(observed_at) or os.time()
+    at = math.max(0, math.floor(at))
+    local observation = {
+        engine = engine,
+        position_id = position_id,
+        percent = normalized_percent,
+        observed_at = at,
+        session_id = state.current_session.id,
+        event_id = modelEventId(state, engine),
+        explicit = explicit == true,
+        status = normalized_status,
+    }
+    if engine == "koreader_live"
+        and ReadingPositionState.shouldBeginReread(state, observation)
+    then
+        local next_ordinal = state.current_session.ordinal + 1
+        local session_id = string.format("s-%d-%d", at, next_ordinal)
+        local started = ReadingPositionState.beginSession(
+            state, session_id, at, "reread")
+        if not started then return nil, false end
+        observation.session_id = session_id
+        observation.event_id = modelEventId(state, engine)
+    end
+    local recorded = ReadingPositionState.observe(state, observation)
+    if not recorded then return nil, false end
+    return state.observations[engine], true
+end
+
+function ReadingStateSync:getPositionState(cde_key, source_path)
+    local asin = receiptAsin(cde_key, source_path)
+    if not asin or not self.plugin or type(self.plugin.settings) ~= "table" then
+        return nil
+    end
+    local settings = self.plugin.settings
+    if type(settings.reading_position_states) ~= "table" then
+        settings.reading_position_states = {}
+    end
+    local state = settings.reading_position_states[asin]
+    if not ReadingPositionState.isValid(state) then
+        state = ReadingPositionState.new()
+        settings.reading_position_states[asin] = state
+    end
+    if not state.current_session then
+        local receipt = self:getPositionReceipt(cde_key, source_path)
+        local started_at = receipt and tonumber(receipt.synced_at) or 0
+        started_at = math.max(0, math.floor(started_at or 0))
+        ReadingPositionState.beginSession(
+            state, string.format("s-%d-1", started_at), started_at,
+            receipt and "import" or "initial")
+        if receipt then
+            local source = receipt.direction == "push"
+                and "koreader_live" or "native"
+            local destination = receipt.direction == "push"
+                and "native" or "koreader_persisted"
+            local position_id = canonicalPositionId(receipt)
+            local first = storeModelObservation(
+                state, source, position_id, receipt.percent,
+                started_at, false, "reading")
+            storeModelObservation(
+                state, destination, position_id, receipt.percent,
+                started_at, false, "reading")
+            if first then
+                ReadingPositionState.acknowledge(
+                    state, first, destination, started_at)
+            end
+        end
+    end
+    return state
+end
+
+local function saveModelIfChanged(sync, changed)
+    if changed and sync.plugin and type(sync.plugin.saveSettings) == "function" then
+        sync.plugin:saveSettings()
+    end
+end
+
+function ReadingStateSync:getCanonicalKOReaderPosition(epub_path, doc_settings)
+    if not self.helper_client or type(self.helper_client.translatePosition) ~= "function"
+        or type(epub_path) ~= "string" or not epub_path:match("%.epub$")
+        or type(doc_settings) ~= "table"
+    then
+        return nil
+    end
+    local xpointer = doc_settings:readSetting("last_xpointer")
+    if type(xpointer) ~= "string" or xpointer == "" then return nil end
+    local position = self.helper_client:translatePosition(epub_path, xpointer)
+    if not validNativePosition(position) then return nil end
+    return position
+end
+
+--- Observe all open-time facts before selecting a source. Unchanged facts do
+--- not receive a fresh timestamp, so merely opening a reader cannot make stale
+--- state win. A changed exact coordinate is a new event even when cc.db time is
+--- stale.
+function ReadingStateSync:observeOpenPositionFacts(
+    cde_key, source_path, doc_settings, epub_path, kindle_state, native_position,
+    kr_timestamp
+)
+    local state = self:getPositionState(cde_key, source_path)
+    local native_id = canonicalPositionId(native_position)
+    if not state or not native_id then return nil end
+    local local_position = self:getCanonicalKOReaderPosition(epub_path, doc_settings)
+    local local_id = canonicalPositionId(local_position)
+    local acknowledged_id = state.acknowledged and state.acknowledged.position_id
+    local concurrent_divergence = acknowledged_id ~= nil
+        and local_id ~= nil
+        and native_id ~= acknowledged_id
+        and local_id ~= acknowledged_id
+        and native_id ~= local_id
+    local now = os.time()
+    local changed = false
+    local previous_native = state.observations.native
+    local native_at = tonumber(kindle_state and kindle_state.timestamp) or 0
+    if previous_native and previous_native.position_id ~= native_id then
+        native_at = now
+    end
+    if native_at <= 0 then native_at = now end
+    local _, native_changed = storeModelObservation(
+        state, "native", native_id,
+        native_position.percent or (kindle_state and kindle_state.percent_read),
+        native_at, false, kindle_state and kindle_state.status)
+    changed = changed or native_changed
+    local _, shelf_changed = storeModelObservation(
+        state, "shelf", nil,
+        kindle_state and kindle_state.percent_read or 0,
+        tonumber(kindle_state and kindle_state.timestamp) or now,
+        false, kindle_state and kindle_state.status)
+    changed = changed or shelf_changed
+
+    if local_id then
+        local summary = doc_settings:readSetting("summary") or {}
+        local _, local_changed = storeModelObservation(
+            state, "koreader_persisted", local_id,
+            (doc_settings:readSetting("percent_finished") or 0) * 100,
+            tonumber(kr_timestamp) or 0,
+            false, summary.status)
+        changed = changed or local_changed
+    end
+    local conflict_reason = concurrent_divergence
+        and "both_readers_changed_since_acknowledgement" or nil
+    if state.last_open_conflict ~= conflict_reason then
+        state.last_open_conflict = conflict_reason
+        changed = true
+    end
+    saveModelIfChanged(self, changed)
+    if concurrent_divergence then
+        -- Both exact readers moved away from the last acknowledged position.
+        -- Kindle's catalog time can be stale, so inventing an ordering here
+        -- would silently discard one reader's real intent. Keep both until a
+        -- later explicit close or manual choice supplies a winner.
+        return {
+            action = "conflict",
+            reason = conflict_reason,
+        }
+    end
+    if not state.observations.koreader_persisted then return nil end
+    return ReadingPositionState.resolve(
+        state, { "native", "koreader_persisted" }, "koreader_persisted")
+end
+
+--- Observe close-time live KOReader intent and the current native fact before
+--- writing anything. A close with no local movement cannot overwrite a newer
+--- native change; a real local rewind remains a newer explicit event.
+function ReadingStateSync:observeClosePositionFacts(
+    cde_key, source_path, doc_settings, epub_path, kindle_state, closed_at
+)
+    local state = self:getPositionState(cde_key, source_path)
+    if not state then return nil end
+    local changed = false
+    local local_position = self:getCanonicalKOReaderPosition(epub_path, doc_settings)
+    local local_id = canonicalPositionId(local_position)
+    if local_id then
+        local summary = doc_settings:readSetting("summary") or {}
+        local _, local_changed = storeModelObservation(
+            state, "koreader_live", local_id,
+            (doc_settings:readSetting("percent_finished") or 0) * 100,
+            closed_at, true, summary.status)
+        changed = changed or local_changed
+    end
+    if self.helper_client and type(self.helper_client.readNativeProgress) == "function" then
+        local asin = receiptAsin(cde_key, source_path)
+        local native = asin and self.helper_client:readNativeProgress(asin, source_path)
+        local native_id = canonicalPositionId(native)
+        if native_id then
+            local previous_native = state.observations.native
+            local native_at = tonumber(kindle_state and kindle_state.timestamp) or 0
+            if previous_native and previous_native.position_id ~= native_id then
+                native_at = closed_at
+            end
+            if native_at <= 0 then native_at = closed_at end
+            local _, native_changed = storeModelObservation(
+                state, "native", native_id,
+                native.percent or (kindle_state and kindle_state.percent_read),
+                native_at, false, kindle_state and kindle_state.status)
+            changed = changed or native_changed
+        end
+    end
+    local _, shelf_changed = storeModelObservation(
+        state, "shelf", nil,
+        kindle_state and kindle_state.percent_read or 0,
+        tonumber(kindle_state and kindle_state.timestamp) or closed_at,
+        false, kindle_state and kindle_state.status)
+    changed = changed or shelf_changed
+    saveModelIfChanged(self, changed)
+    if not state.observations.koreader_live or not state.observations.native then
+        return nil
+    end
+    return ReadingPositionState.resolve(
+        state, { "koreader_live", "native" }, "native")
+end
+
 --- Record an exact position only after both the authoritative LPR operation
 --- and its corresponding KOReader/native state update have succeeded.
-function ReadingStateSync:recordPositionReceipt(cde_key, source_path, position, direction)
+function ReadingStateSync:recordPositionReceipt(
+    cde_key, source_path, position, direction, status, observed_at
+)
     local asin = receiptAsin(cde_key, source_path)
     if not asin or not validNativePosition(position) or not self.plugin then
         return false
     end
     local settings = self.plugin.settings
+    local state = self:getPositionState(cde_key, source_path)
     if type(settings.position_sync_receipts) ~= "table" then
         settings.position_sync_receipts = {}
     end
+    local synced_at = tonumber(observed_at) or os.time()
+    synced_at = math.max(0, math.floor(synced_at))
     settings.position_sync_receipts[asin] = {
         long = position.long,
         pid = position.pid,
         percent = position.percent,
         direction = direction,
-        synced_at = os.time(),
+        synced_at = synced_at,
     }
+    if state then
+        local source = direction == "push" and "koreader_live" or "native"
+        local destination = direction == "push" and "native" or "koreader_persisted"
+        local position_id = canonicalPositionId(position)
+        local source_observation = storeModelObservation(
+            state, source, position_id, position.percent,
+            synced_at, direction == "push", status)
+        storeModelObservation(
+            state, destination, position_id, position.percent,
+            synced_at, false, status)
+        storeModelObservation(
+            state, "shelf", nil, position.percent,
+            synced_at, false, status)
+        if source_observation then
+            ReadingPositionState.acknowledge(
+                state, source_observation, destination, synced_at)
+        end
+    end
     if type(self.plugin.saveSettings) == "function" then
         self.plugin:saveSettings()
     end
@@ -556,7 +825,8 @@ function ReadingStateSync:syncFromKindle(cde_key, source_path, doc_settings)
     )
     if applied then
         doc_settings:saveSetting("last_xpointer", exact_xpointer)
-        self:recordPositionReceipt(cde_key, source_path, native_position, "pull")
+        self:recordPositionReceipt(
+            cde_key, source_path, native_position, "pull", kindle_state.status)
     end
     return applied
 end
@@ -630,7 +900,9 @@ function ReadingStateSync:syncToKindle(cde_key, source_path, doc_settings, epub_
         cde_key, source_path, native_percent, current_timestamp, kr_status
     )
     if written then
-        self:recordPositionReceipt(cde_key, source_path, native_position, "push")
+        self:recordPositionReceipt(
+            cde_key, source_path, native_position, "push", kr_status,
+            current_timestamp)
     end
     return written
 end
@@ -684,13 +956,38 @@ function ReadingStateSync:syncFromKindleAutomatic(
         local same_status = kr_status == kindle_state.status
             or (kr_percent >= 1 and kindle_state.percent_read >= 100)
         if same_position and same_status then
-            self:recordPositionReceipt(cde_key, source_path, native_position, "bootstrap")
+            self:recordPositionReceipt(
+                cde_key, source_path, native_position, "bootstrap", kr_status)
         else
             logger.warn("KindlePlugin: deferring first exact LPR pull without comparable timestamps")
         end
         return false
     end
-    local kindle_is_newer = receipt ~= nil
+    local model_decision = self:observeOpenPositionFacts(
+        cde_key, source_path, doc_settings, epub_path,
+        kindle_state, native_position, kr_timestamp)
+    if model_decision then
+        if model_decision.action == "conflict" then
+            logger.warn("KindlePlugin: equal-time exact position conflict; keeping KOReader")
+            return false
+        end
+        if model_decision.action == "no_op"
+            or model_decision.action == "await_destination_readback"
+        then
+            local receipt = self:getPositionReceipt(cde_key, source_path)
+            self:repairCatalogFromReceipt(
+                cde_key, source_path, receipt, native_position, kindle_state)
+            return false
+        end
+        if model_decision.action ~= "apply"
+            or not model_decision.winner
+            or model_decision.winner.engine ~= "native"
+        then
+            return false
+        end
+    end
+    local kindle_is_newer = model_decision ~= nil
+        or receipt ~= nil
         or kindle_state.timestamp > kr_timestamp
     local sync_details = {
         book_title = self:getBookTitle(cde_key, doc_settings),
@@ -706,7 +1003,8 @@ function ReadingStateSync:syncFromKindleAutomatic(
         local same_status = kr_status == kindle_state.status
             or (kr_percent >= 1 and kindle_state.percent_read >= 100)
         if same_position and same_status then
-            self:recordPositionReceipt(cde_key, source_path, native_position, "pull")
+            self:recordPositionReceipt(
+                cde_key, source_path, native_position, "pull", kindle_state.status)
             return
         end
         if apply_live_xpointer then
@@ -724,7 +1022,8 @@ function ReadingStateSync:syncFromKindleAutomatic(
         if sync_completed then
             doc_settings:saveSetting("last_xpointer", exact_xpointer)
             doc_settings:flush()
-            self:recordPositionReceipt(cde_key, source_path, native_position, "pull")
+            self:recordPositionReceipt(
+                cde_key, source_path, native_position, "pull", kindle_state.status)
         end
     end, sync_details)
     return sync_completed
@@ -796,7 +1095,28 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
         status = "",
         kindle_status = 0,
     }
-    if SyncDecisionMaker.areBothSidesComplete(kindle_state, kr_percent, kr_status) then
+    local model_decision = self:observeClosePositionFacts(
+        cde_key, source_path, doc_settings, epub_path,
+        kindle_state, close_timestamp)
+    if model_decision then
+        if model_decision.action == "conflict" then
+            logger.warn("KindlePlugin: equal-time close conflict; keeping both positions")
+            return false
+        end
+        if model_decision.action == "no_op"
+            or model_decision.action == "await_destination_readback"
+        then
+            return false
+        end
+        if model_decision.action ~= "apply"
+            or not model_decision.winner
+            or model_decision.winner.engine ~= "koreader_live"
+        then
+            return false
+        end
+    elseif SyncDecisionMaker.areBothSidesComplete(
+        kindle_state, kr_percent, kr_status)
+    then
         return false
     end
     -- This method runs in KOReader's close lifecycle. The just-captured
@@ -828,7 +1148,9 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
                 kr_status
             )
             if sync_completed then
-                self:recordPositionReceipt(cde_key, source_path, native_position, "push")
+                self:recordPositionReceipt(
+                    cde_key, source_path, native_position, "push", kr_status,
+                    current_timestamp)
             end
         end
     end, sync_details)
@@ -887,7 +1209,8 @@ function ReadingStateSync:executePullFromKindle(cde_key, source_path, doc_settin
         doc_settings:saveSetting("summary", summary)
         doc_settings:saveSetting("last_xpointer", exact_xpointer)
         doc_settings:flush()
-        self:recordPositionReceipt(cde_key, source_path, native_position, "pull")
+        self:recordPositionReceipt(
+            cde_key, source_path, native_position, "pull", kindle_state.status)
 
         sync_completed = true
     end, sync_details)
@@ -940,7 +1263,9 @@ function ReadingStateSync:executePushToKindle(cde_key, source_path, doc_settings
                 cde_key, source_path, native_percent, current_timestamp, kr_status
             )
             if sync_completed then
-                self:recordPositionReceipt(cde_key, source_path, native_position, "push")
+                self:recordPositionReceipt(
+                    cde_key, source_path, native_position, "push", kr_status,
+                    current_timestamp)
             end
         end
     end, sync_details)
