@@ -310,6 +310,54 @@ describe("ShowReaderExt", function()
             ShowReaderExt:unapply()
         end)
 
+        it("should preserve the caller callback when destination verification errors", function()
+            local tracker = {
+                verify_calls = 0,
+                caller_calls = 0,
+            }
+            local mock_sync = {
+                isAutomaticSyncEnabled = function() return true end,
+                extractCdeKey = function(self, path)
+                    return path:match("^KINDLE_VIRTUAL://([A-Z0-9]+)/")
+                end,
+                syncFromKindleAutomatic = function()
+                    return true, 18
+                end,
+                verifyOpenedKOReaderPosition = function()
+                    tracker.verify_calls = tracker.verify_calls + 1
+                    error("simulated verification failure")
+                end,
+            }
+            local DocSettings = require("docsettings")
+            local original_open = DocSettings.open
+            DocSettings.open = function()
+                return { flush = function() end }
+            end
+            local opened_reader = { ready = true }
+
+            ShowReaderExt:init(createMockVirtualLibrary(), mock_sync)
+            ShowReaderExt:apply()
+            readerui_module:showReader(
+                "KINDLE_VIRTUAL://B001/book.kfx",
+                nil, nil, nil,
+                function(reader)
+                    tracker.caller_calls = tracker.caller_calls + 1
+                    tracker.caller_reader = reader
+                    return "caller-result"
+                end
+            )
+
+            local callback_result =
+                original_showReader_calls[1].after_open_callback(opened_reader)
+            assert.equals(1, tracker.verify_calls)
+            assert.equals(1, tracker.caller_calls)
+            assert.equals(opened_reader, tracker.caller_reader)
+            assert.equals("caller-result", callback_result)
+
+            DocSettings.open = original_open
+            ShowReaderExt:unapply()
+        end)
+
         it("should let the automatic sync policy reject a disabled sync", function()
             local sync_tracker = { called = false }
             local mock_sync = {

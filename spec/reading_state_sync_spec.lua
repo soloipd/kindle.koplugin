@@ -927,6 +927,143 @@ describe("ReadingStateSync", function()
             assert.is_nil(sync.pending_open_verification)
         end)
 
+        it("should fail closed when the live renderer omits its percentage", function()
+            local sync = ReadingStateSync:new()
+            sync:setEnabled(true)
+            local plugin = setupPluginSettings(sync)
+            local verification_id = sync:stageOpenPositionVerification(
+                "B007N6JEII", history_path, "/cache/book.epub",
+                "/body/DocFragment/body/p/text().52",
+                { long = "ATwFAACcAAAA", pid = 442742, percent = 52 },
+                {
+                    percent_read = 52,
+                    timestamp = 1000,
+                    status = "reading",
+                },
+                "pull",
+                900)
+            local reader = {
+                document = { file = "/cache/book.epub" },
+                doc_settings = createMockDocSettings("/cache/book.epub"),
+                rolling = {
+                    getBookLocation = function()
+                        return "/body/DocFragment/body/p/text().52"
+                    end,
+                    getLastPercent = function() return nil end,
+                },
+            }
+
+            assert.is_false(sync:verifyOpenedKOReaderPosition(
+                reader, "/cache/book.epub", nil, verification_id))
+            assert.is_nil(plugin.settings.position_sync_receipts)
+        end)
+
+        it("should accept a normalized XPointer with the same native coordinate", function()
+            local expected_position = {
+                long = "ATwFAACcAAAA", pid = 442742, percent = 52,
+            }
+            local client = {
+                translatePosition = function(_, epub_path, xpointer)
+                    assert.equals("/cache/book.epub", epub_path)
+                    assert.equals("/normalized/xpointer", xpointer)
+                    return expected_position
+                end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            local plugin = setupPluginSettings(sync)
+            local verification_id = sync:stageOpenPositionVerification(
+                "B007N6JEII", history_path, "/cache/book.epub",
+                "/body/DocFragment/body/p/text().52",
+                expected_position,
+                {
+                    percent_read = 52,
+                    timestamp = 1000,
+                    status = "reading",
+                },
+                "pull",
+                900)
+            local reader = {
+                document = { file = "/cache/book.epub" },
+                doc_settings = createMockDocSettings("/cache/book.epub"),
+                rolling = {
+                    getBookLocation = function() return "/normalized/xpointer" end,
+                    getLastPercent = function() return 0.49 end,
+                },
+            }
+
+            assert.is_true(sync:verifyOpenedKOReaderPosition(
+                reader, "/cache/book.epub", nil, verification_id))
+            assert.equals("ATwFAACcAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+        end)
+
+        it("should restage an unconfirmed pull after a plugin restart", function()
+            local first = ReadingStateSync:new()
+            first:setEnabled(true)
+            local plugin = setupPluginSettings(first)
+            plugin.settings.position_sync_receipts = {
+                B007N6JEII = {
+                    long = "ATwFAACbAAAA", pid = 442741, percent = 38,
+                },
+            }
+            RealDocSettings:_setSidecarFile(history_path, true)
+            local native_state = {
+                percent_read = 52,
+                timestamp = 1000,
+                status = "reading",
+                kindle_status = 1,
+            }
+            local first_read = mockReadKindleState(first, native_state)
+            first.getAuthoritativeKindleXPointer = function()
+                return "/body/DocFragment/body/p/text().52", nil, {
+                    long = "ATwFAACcAAAA", pid = 442742, percent = 52,
+                }
+            end
+            local ds = createMockDocSettings(history_path, {
+                percent_finished = 0.38,
+                last_xpointer = "/body/DocFragment/body/p/text().38",
+                summary = { status = "reading" },
+            })
+            local staged, first_id = first:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub")
+            assert.is_true(staged)
+            assert.is_number(first_id)
+            assert.equals("ATwFAACbAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+            restoreReadKindleState(first, first_read)
+
+            local restarted = ReadingStateSync:new()
+            restarted:setEnabled(true)
+            restarted:setPlugin(plugin, SYNC_DIRECTION)
+            local restarted_read = mockReadKindleState(restarted, native_state)
+            restarted.getAuthoritativeKindleXPointer = first.getAuthoritativeKindleXPointer
+            local restaged, second_id = restarted:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub")
+            assert.is_true(restaged)
+            assert.is_number(second_id)
+            assert.equals("ATwFAACbAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+
+            local reader = {
+                document = { file = "/cache/book.epub" },
+                doc_settings = ds,
+                rolling = {
+                    getBookLocation = function()
+                        return "/body/DocFragment/body/p/text().52"
+                    end,
+                    getLastPercent = function() return 0.49 end,
+                },
+            }
+            assert.is_true(restarted:verifyOpenedKOReaderPosition(
+                reader, "/cache/book.epub", nil, second_id))
+            assert.equals("ATwFAACcAAAA",
+                plugin.settings.position_sync_receipts.B007N6JEII.long)
+
+            restoreReadKindleState(restarted, restarted_read)
+            RealDocSettings:_clearSidecars()
+        end)
+
         it("should let only the newest rapid open acknowledge a destination", function()
             local sync = ReadingStateSync:new()
             sync:setEnabled(true)
