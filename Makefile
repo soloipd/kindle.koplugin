@@ -42,6 +42,18 @@ test: ## Run all tests (excludes e2e)
 		--exclude-tags=e2e \
 		/opt/plugin/spec/
 
+.PHONY: test-native-agent
+test-native-agent: ## Verify the packaged ReaderSDK agent and timeout contract
+	./scripts/check_native_progress_agent
+
+.PHONY: build-native-agent
+build-native-agent: ## Rebuild the ReaderSDK agent (requires local SDK compile jars)
+	./scripts/build_native_progress_agent
+
+.PHONY: test-python
+test-python: ## Run Python/Java tests without relying on an old system Python
+	./scripts/test_python
+
 .PHONY: test-e2e
 test-e2e: ## Run E2E tests only (requires network)
 	$(RUN) busted-koreader --verbose \
@@ -68,7 +80,7 @@ test-filter: ## Run tests matching FILTER pattern (pass FILTER="...")
 
 .PHONY: lint
 lint: ## Run luacheck inside the container
-	$(RUN) luacheck /opt/plugin
+	$(RUN) sh -lc 'cd /opt/plugin && luacheck .'
 
 # =============================================================================
 # Interactive

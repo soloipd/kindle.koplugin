@@ -255,7 +255,7 @@ function KindlePlugin:createVirtualLibraryToggleMenuItem()
             return self.settings.enable_virtual_library ~= false
         end,
         callback = function()
-            self.settings.enable_virtual_library = not (self.settings.enable_virtual_library ~= false)
+            self.settings.enable_virtual_library = self.settings.enable_virtual_library == false
             self:saveSettings()
             UIManager:askForRestart()
         end,

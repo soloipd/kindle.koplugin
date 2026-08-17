@@ -9,6 +9,15 @@ OUTPUT="$REPO_ROOT/lib/KFXVoucherExtractor.jar"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kindle-voucher-extractor.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
+# shellcheck source=java_toolchain.sh
+source "$REPO_ROOT/scripts/java_toolchain.sh"
+JDK_BIN="$(kindle_find_jdk_bin)" || {
+    printf '%s\n' "A functional JDK 11+ with deterministic jar support is required." >&2
+    exit 2
+}
+JAVAC_BIN="$JDK_BIN/javac"
+JAR_BIN="$JDK_BIN/jar"
+
 mkdir -p "$BUILD_DIR/classes" "$BUILD_DIR/jar/META-INF"
 
 # Compile against minimal API stubs. The actual SDK implementation is supplied
@@ -18,7 +27,7 @@ while IFS= read -r stub_source; do
     stub_sources+=("$stub_source")
 done < <(find "$STUBS_DIR" -name '*.java' -type f -print | sort)
 
-javac --release 8 \
+"$JAVAC_BIN" --release 8 \
     -d "$BUILD_DIR/classes" \
     "${stub_sources[@]}" \
     "$SOURCE"
@@ -31,7 +40,7 @@ printf 'Manifest-Version: 1.0\nMain-Class: KFXVoucherExtractor\n\n' \
 rm -f "$OUTPUT"
 (
     cd "$BUILD_DIR/jar"
-    jar cfm "$OUTPUT" META-INF/MANIFEST.MF KFXVoucherExtractor.class KFXVoucherExtractor.java
+    "$JAR_BIN" cfm "$OUTPUT" META-INF/MANIFEST.MF KFXVoucherExtractor.class KFXVoucherExtractor.java
 )
 
 echo "Built $OUTPUT"

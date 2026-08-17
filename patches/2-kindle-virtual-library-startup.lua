@@ -20,7 +20,6 @@ if not plugin_settings.enable_virtual_library then
 end
 
 local virtual_prefix = "KINDLE_VIRTUAL://"
-local escaped_prefix = PatternUtils.escape(virtual_prefix)
 
 --- Get the cache directory for converted EPUBs.
 local function getCacheDir()

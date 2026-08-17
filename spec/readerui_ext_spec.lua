@@ -6,15 +6,28 @@ require('busted.runner')()
 local helper = require("spec/test_helper")
 
 describe("ReaderUIExt", function()
+    local BookList
     local ReaderUIExt
+    local original_set_book_info_cache
+    local original_set_book_info_cache_property
 
     setup(function()
         helper.setup_complete()
+        BookList = require("ui/widget/booklist")
+        original_set_book_info_cache = BookList.setBookInfoCache
+        original_set_book_info_cache_property =
+            BookList.setBookInfoCacheProperty
     end)
 
     before_each(function()
         package.loaded["lua/readerui_ext"] = nil
         ReaderUIExt = require("lua/readerui_ext")
+    end)
+
+    after_each(function()
+        BookList.setBookInfoCache = original_set_book_info_cache
+        BookList.setBookInfoCacheProperty =
+            original_set_book_info_cache_property
     end)
 
     describe("initialization", function()
@@ -130,6 +143,81 @@ describe("ReaderUIExt", function()
             assert.equals("/mnt/us/documents/test.kfx", tracker.epub_path)
         end)
 
+        it("should queue silent close sync without blocking the reader UI", function()
+            local tracker = { background = false, blocking = false }
+            local mock_vlib = createMockVirtualLibrary(true)
+            local mock_sync = createMockSync(true)
+            mock_sync.canSyncCloseInBackground = function() return true end
+            mock_sync.syncToKindleAutomatic = function()
+                tracker.blocking = true
+            end
+            mock_sync.syncToKindleAutomaticInBackground = function(
+                self, cde_key, source_path, doc_settings, epub_path
+            )
+                tracker.background = true
+                tracker.cde_key = cde_key
+                tracker.source_path = source_path
+                tracker.epub_path = epub_path
+                return true
+            end
+            local mock_rui = createMockReaderUI(
+                "KINDLE_VIRTUAL://B001/test.kfx",
+                {
+                    readSetting = function(self, key)
+                        if key == "percent_finished" then return 0.54 end
+                        if key == "last_xpointer" then return "/body/p/text().54" end
+                        if key == "summary" then return { status = "reading" } end
+                        return nil
+                    end,
+                }
+            )
+            local ext = ReaderUIExt:new()
+            ext:init(mock_vlib, mock_sync)
+            ext:apply(mock_rui)
+
+            mock_rui.onClose(mock_rui, false)
+
+            assert.is_true(tracker.background)
+            assert.is_false(tracker.blocking)
+            assert.equals("B001", tracker.cde_key)
+            assert.equals("/mnt/us/documents/test.kfx", tracker.source_path)
+            assert.equals("/mnt/us/documents/test.kfx", tracker.epub_path)
+        end)
+
+        it("should refresh the complete virtual shelf cache from KOReader metadata", function()
+            local full_cache_call
+            local property_cache_called = false
+            BookList.setBookInfoCache = function(path, doc_settings)
+                full_cache_call = { path = path, doc_settings = doc_settings }
+            end
+            BookList.setBookInfoCacheProperty = function()
+                property_cache_called = true
+            end
+            local mock_vlib = createMockVirtualLibrary(true)
+            local mock_sync = createMockSync(false)
+            local doc_settings = {
+                readSetting = function(self, key)
+                    if key == "percent_finished" then return 0.54 end
+                    if key == "summary" then return { status = "reading" } end
+                    if key == "annotations" then return { { page = 455 } } end
+                    return nil
+                end,
+            }
+            local mock_rui = createMockReaderUI(
+                "KINDLE_VIRTUAL://B001/test.kfx", doc_settings)
+
+            local ext = ReaderUIExt:new()
+            ext:init(mock_vlib, mock_sync)
+            ext:apply(mock_rui)
+            mock_rui.onClose(mock_rui, false)
+
+            assert.is_not_nil(full_cache_call)
+            assert.equals(
+                "KINDLE_VIRTUAL://B001/test.kfx", full_cache_call.path)
+            assert.equals(doc_settings, full_cache_call.doc_settings)
+            assert.is_false(property_cache_called)
+        end)
+
         it("should not sync when auto-sync is disabled", function()
             local tracker = { called = false }
             local mock_vlib = createMockVirtualLibrary(true)
@@ -179,7 +267,6 @@ describe("ReaderUIExt", function()
         end)
 
         it("should not sync when no reading state sync configured", function()
-            local tracker = { called = false }
             local mock_vlib = createMockVirtualLibrary(true)
 
             local ext = ReaderUIExt:new()

@@ -39,7 +39,11 @@ A KOReader plugin that lets you browse and read your Kindle book library directl
    KOReader Bookshelf, or History; cached Kindle EPUBs are mapped back to their
    native source book automatically
 
-Automatic sync runs before opening and after closing a book. **Ask me** waits
+Automatic sync runs before opening and after closing a book. A silent close
+returns to the shelf immediately and performs the native save in one
+low-priority background worker. Rapid closes are serialized, the newest queued
+snapshot for each book replaces an older one, and transient work is retried no
+more than three times. **Ask me** waits
 for your answer at that lifecycle boundary, **Always sync** applies silently,
 and **Never** leaves the destination unchanged. The plugin translates KOReader
 XPointers to Kindle KFX coordinates, persists them through Kindle's ReaderSDK,
@@ -57,17 +61,30 @@ shelf keeps the percentage calculated by its own renderer. An exact pull moves
 KOReader by translated XPointer and never copies the native percentage into
 KOReader's Bookshelf. This keeps both shelf displays consistent with their
 readers while the exact text position remains the cross-reader source of truth.
+KOReader refreshes the complete virtual shelf cache—progress, reading status,
+page count, and annotation presence—from its canonical sidecar. Upgrades archive
+obsolete duplicate virtual sidecars under a recoverable `.migrated-v0.0.8`
+name, preventing stale progress or annotation counts from reappearing.
 
 The plugin also stores a text-free reconciliation receipt containing only the
 last successfully synchronized KFX position. On the next open it compares the
 native reader's exact last-page-read coordinate with that receipt. A changed
 coordinate is pulled even if Kindle's catalog timestamp is stale; an unchanged
-coordinate cannot overwrite newer KOReader progress. If the coordinate still
+coordinate cannot overwrite newer KOReader progress. With the conflict-safe
+model enabled, a newer persisted KOReader coordinate is pushed back to Kindle
+even when Kindle still matches the older receipt. The unchanged-native path
+does not start the reverse position translator. If the coordinate still
 matches but a stale native process has overwritten only the shelf percentage,
 the plugin repairs that display value from Kindle's verified rendered percent
-without moving either reader. A receipt is written only after the exact native
-save is read back and the shelf update succeeds, or—when pulling in the other
-direction—after KOReader's live renderer confirms the exact destination.
+without moving either reader. Equivalent `text()` and `text()[1]` XPointers are
+compared locally rather than launching another translator. A receipt is written
+only after the exact native save is read back and the shelf update succeeds,
+or—when pulling in the other direction—after KOReader's live renderer confirms
+the exact destination.
+
+Native ReaderSDK writes use a three-second request window and report text-free
+per-stage timings. The attach helper and result wait are each hard-capped at 12
+seconds, so a failed firmware bridge cannot leave KOReader waiting indefinitely.
 
 #### Experimental conflict-safe position model
 
@@ -134,9 +151,19 @@ MIT License
 ## Building from source
 
 ```sh
-# Build ARM binary (Docker + Nuitka)
+# Build the ARM release from pinned, hash-verified inputs
 ./python_build.sh
 
 # Run Lua tests
 ./scripts/test
+
+# Run all Python/Java compatibility tests. This automatically uses a pinned
+# Python 3.11 + JDK container if the system Python is old or incomplete.
+make test-python
+
+# Verify the packaged ReaderSDK agent and timeout contract
+make test-native-agent
+
+# Run the configured Lua lint gate
+make lint
 ```

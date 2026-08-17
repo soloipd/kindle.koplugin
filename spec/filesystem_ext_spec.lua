@@ -5,7 +5,6 @@ local helper = require("spec/test_helper")
 
 describe("FilesystemExt", function()
     local FilesystemExt
-    local VirtualLibrary
 
     setup(function()
         helper.setup_complete()
@@ -159,7 +158,7 @@ describe("FilesystemExt", function()
             local lfs = require("libs/libkoreader-lfs")
             local original = lfs.attributes
 
-            mock_virtual_library = {
+            local mock_virtual_library = {
                 isActive = function() return true end,
                 isVirtualPath = function() return false end,
                 getRealPath = function() return nil end,

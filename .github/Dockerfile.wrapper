@@ -2,7 +2,7 @@
 # Only builds two tiny C files — takes seconds, not minutes.
 # The rest of the build (Python runtime, wheels) is download-based, no Docker needed.
 
-FROM arm32v7/gcc:12
+FROM arm32v7/gcc:12@sha256:02c806c776f0e182b77ace82aadd501dcd0be902650139b4c84fa12d22895771
 
 RUN mkdir -p /build
 

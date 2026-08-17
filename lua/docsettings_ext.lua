@@ -6,6 +6,7 @@ local DocSettingsExt = {}
 
 local DOCSETTINGS_DIR = DataStorage:getDocSettingsDir()
 local HISTORY_DIR = DataStorage:getHistoryDir()
+local LEGACY_MIGRATION_TAG = ".migrated-v0.0.8"
 
 local function sanitizeId(book_id)
     return (book_id or "unknown"):gsub("[^%w%.%-_]", "_")
@@ -65,6 +66,37 @@ local function copyFileIfMissing(source_path, destination_path)
     return true
 end
 
+-- Preserve stale sidecars for manual recovery while removing their active
+-- KOReader filenames. Never replace an archive created by an earlier run.
+local function quarantineFile(path)
+    if not readableFileExists(path) then return nil end
+    for index = 0, 99 do
+        local suffix = index == 0 and "" or "." .. index
+        local archive_path = path .. LEGACY_MIGRATION_TAG .. suffix
+        if not readableFileExists(archive_path) then
+            local renamed, rename_error = os.rename(path, archive_path)
+            if renamed then return archive_path end
+            logger.warn(
+                "KindlePlugin: failed to archive a legacy sidecar:",
+                rename_error or "unknown error"
+            )
+            return nil
+        end
+    end
+    logger.warn("KindlePlugin: legacy sidecar archive slots are exhausted")
+    return nil
+end
+
+local function quarantineLegacySidecar(legacy_path)
+    local archived_current = quarantineFile(legacy_path)
+    local archived_old = quarantineFile(legacy_path .. ".old")
+    if archived_current or archived_old then
+        logger.info("KindlePlugin: archived stale legacy virtual sidecar metadata")
+        return true
+    end
+    return false
+end
+
 function DocSettingsExt:migrateLegacySidecar(book, canonical, preferred_doc_path, preferred_dir)
     local legacy_dir = DOCSETTINGS_DIR .. "/kindle_virtual/" .. sanitizeId(book.id) .. ".sdr"
     if legacy_dir == preferred_dir then
@@ -83,8 +115,11 @@ function DocSettingsExt:migrateLegacySidecar(book, canonical, preferred_doc_path
     -- stale legacy copy (which may contain fewer annotations or older progress).
     if readableFileExists(preferred_path)
         or readableFileExists(preferred_path .. ".old")
-        or not readableFileExists(legacy_path)
     then
+        quarantineLegacySidecar(legacy_path)
+        return
+    end
+    if not readableFileExists(legacy_path) then
         return
     end
 
@@ -94,6 +129,7 @@ function DocSettingsExt:migrateLegacySidecar(book, canonical, preferred_doc_path
     end
     if copyFileIfMissing(legacy_path, preferred_path) then
         copyFileIfMissing(legacy_path .. ".old", preferred_path .. ".old")
+        quarantineLegacySidecar(legacy_path)
         logger.info("KindlePlugin: migrated a legacy virtual sidecar")
     end
 end

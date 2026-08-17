@@ -1,0 +1,17 @@
+FROM eclipse-temurin:21-jdk@sha256:57865c22b954cf920cb05a610af81d577e89783282514ba071e99c7357f6c769 AS jdk
+
+FROM python:3.11-bookworm@sha256:c17b9ca6def1a936e55c77f086aaaf5f6a6c5f4d2fb4b7ac8c0113ba94e8b6ab
+
+COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="/opt/java/openjdk/bin:${PATH}"
+
+RUN python3 -m pip install --disable-pip-version-check --no-cache-dir \
+    pycryptodome==3.23.0 \
+    beautifulsoup4==4.14.3 \
+    Pillow==12.2.0 \
+    lxml==6.0.3 \
+    pypdf==5.9.0
+
+WORKDIR /work
+CMD ["python3", "-m", "unittest", "discover", "-s", "python/tests", "-p", "test_*.py", "-v"]

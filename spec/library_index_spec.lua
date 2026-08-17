@@ -87,6 +87,7 @@ describe("LibraryIndex", function()
 
             -- First call populates cache
             idx:refresh(true)
+            assert.is_true(scan_called)
             scan_called = false
 
             -- Second call should use cache (not forced)

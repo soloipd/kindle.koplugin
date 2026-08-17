@@ -5,6 +5,12 @@ local util = require("util")
 
 local HelperClient = {}
 HelperClient.__index = HelperClient
+-- ReaderSDK's request window is not a process timeout. A 30-second value made
+-- every otherwise-successful open/close save hold KOReader's UI for roughly
+-- 40 seconds on current firmware. Device acceptance testing confirmed that a
+-- 3-second window still verifies the local LPR, native acceptance, and catalog
+-- update while completing the full attach round-trip in about two seconds.
+HelperClient.NATIVE_PROGRESS_SYNC_TIMEOUT_MS = 3000
 
 function HelperClient:new(opts)
     local instance = opts or {}
@@ -213,7 +219,10 @@ function HelperClient:saveNativeProgress(asin, native_path, position)
         return false, "invalid native position"
     end
     if self.native_progress_runner then
-        return self.native_progress_runner(asin, native_path, position)
+        return self.native_progress_runner(
+            asin, native_path, position,
+            self.NATIVE_PROGRESS_SYNC_TIMEOUT_MS
+        )
     end
 
     local request_id = tostring(os.time()) .. tostring(math.random(100000, 999999))
@@ -229,6 +238,11 @@ function HelperClient:saveNativeProgress(asin, native_path, position)
     payload:write("native_path_hex=", hexEncode(native_path), "\n")
     payload:write("long_position=", position.long, "\n")
     payload:write("short_position=", tostring(position.pid), "\n")
+    payload:write(
+        "sync_timeout_ms=",
+        tostring(self.NATIVE_PROGRESS_SYNC_TIMEOUT_MS),
+        "\n"
+    )
     payload:close()
     os.execute("chmod 600 " .. util.shell_escape({ payload_path }))
 
@@ -280,6 +294,11 @@ function HelperClient:readNativeProgress(asin, native_path)
     payload:write("asin=", asin, "\n")
     payload:write("operation=read\n")
     payload:write("native_path_hex=", hexEncode(native_path), "\n")
+    payload:write(
+        "sync_timeout_ms=",
+        tostring(self.NATIVE_PROGRESS_SYNC_TIMEOUT_MS),
+        "\n"
+    )
     payload:close()
     os.execute("chmod 600 " .. util.shell_escape({ payload_path }))
 

@@ -5,11 +5,13 @@ local helper = require("spec/test_helper")
 
 describe("DocSettingsExt", function()
     local DocSettingsExt
+    local DataStorage
     local util
 
     setup(function()
         helper.setup_complete()
         DocSettingsExt = require("lua/docsettings_ext")
+        DataStorage = require("datastorage")
         util = require("util")
     end)
 
@@ -182,6 +184,8 @@ describe("DocSettingsExt", function()
     end)
 
     describe("legacy migration", function()
+        local legacy_dir
+        local legacy_path
         local original_make_path
         local tmp_dir
 
@@ -190,6 +194,10 @@ describe("DocSettingsExt", function()
             tmp_dir = os.tmpname()
             os.remove(tmp_dir)
             assert.is_true(os.execute("mkdir -p " .. tmp_dir) == 0)
+            legacy_dir = DataStorage:getDocSettingsDir()
+                .. "/kindle_virtual/test.sdr"
+            legacy_path = legacy_dir .. "/metadata.epub.lua"
+            os.execute("rm -rf " .. legacy_dir)
             DocSettingsExt:init({})
             DocSettingsExt.original_methods.getSidecarFilename = function()
                 return "metadata.epub.lua"
@@ -198,8 +206,23 @@ describe("DocSettingsExt", function()
 
         after_each(function()
             util.makePath = original_make_path
+            os.execute("rm -rf " .. legacy_dir)
             os.execute("rm -rf " .. tmp_dir)
         end)
+
+        local function writeFile(path, contents)
+            local file = assert(io.open(path, "wb"))
+            file:write(contents)
+            file:close()
+        end
+
+        local function readFile(path)
+            local file = io.open(path, "rb")
+            if not file then return nil end
+            local contents = file:read("*a")
+            file:close()
+            return contents
+        end
 
         it("should not reimport legacy metadata when the canonical file is readable", function()
             local preferred_dir = tmp_dir .. "/cache/test.sdr"
@@ -225,6 +248,89 @@ describe("DocSettingsExt", function()
             local current = assert(io.open(preferred, "rb"))
             assert.equals("canonical", current:read("*a"))
             current:close()
+        end)
+
+        it("should quarantine stale legacy metadata when canonical metadata exists", function()
+            local preferred_dir = tmp_dir .. "/cache/test.sdr"
+            local preferred = preferred_dir .. "/metadata.epub.lua"
+            assert.is_true(os.execute("mkdir -p " .. preferred_dir) == 0)
+            assert.is_true(os.execute("mkdir -p " .. legacy_dir) == 0)
+            writeFile(preferred, "canonical")
+            writeFile(legacy_path, "stale-current")
+            writeFile(legacy_path .. ".old", "stale-old")
+
+            DocSettingsExt:migrateLegacySidecar(
+                { id = "test", open_mode = "convert" },
+                "KINDLE_VIRTUAL://test/Book.epub",
+                tmp_dir .. "/cache/test.epub",
+                preferred_dir
+            )
+
+            assert.equals("canonical", readFile(preferred))
+            assert.is_nil(readFile(legacy_path))
+            assert.is_nil(readFile(legacy_path .. ".old"))
+            assert.equals(
+                "stale-current",
+                readFile(legacy_path .. ".migrated-v0.0.8")
+            )
+            assert.equals(
+                "stale-old",
+                readFile(legacy_path .. ".old.migrated-v0.0.8")
+            )
+        end)
+
+        it("should preserve an earlier quarantine when archiving another legacy copy", function()
+            local preferred_dir = tmp_dir .. "/cache/test.sdr"
+            local preferred = preferred_dir .. "/metadata.epub.lua"
+            assert.is_true(os.execute("mkdir -p " .. preferred_dir) == 0)
+            assert.is_true(os.execute("mkdir -p " .. legacy_dir) == 0)
+            writeFile(preferred, "canonical")
+            writeFile(legacy_path, "new-stale-copy")
+            writeFile(legacy_path .. ".migrated-v0.0.8", "earlier-copy")
+
+            DocSettingsExt:migrateLegacySidecar(
+                { id = "test", open_mode = "convert" },
+                "KINDLE_VIRTUAL://test/Book.epub",
+                tmp_dir .. "/cache/test.epub",
+                preferred_dir
+            )
+
+            assert.equals(
+                "earlier-copy",
+                readFile(legacy_path .. ".migrated-v0.0.8")
+            )
+            assert.equals(
+                "new-stale-copy",
+                readFile(legacy_path .. ".migrated-v0.0.8.1")
+            )
+        end)
+
+        it("should archive legacy metadata after migrating it to an empty canonical path", function()
+            local preferred_dir = tmp_dir .. "/cache/test.sdr"
+            assert.is_true(os.execute("mkdir -p " .. legacy_dir) == 0)
+            writeFile(legacy_path, "legacy-current")
+            writeFile(legacy_path .. ".old", "legacy-old")
+
+            DocSettingsExt:migrateLegacySidecar(
+                { id = "test", open_mode = "convert" },
+                "KINDLE_VIRTUAL://test/Book.epub",
+                tmp_dir .. "/cache/test.epub",
+                preferred_dir
+            )
+
+            assert.equals(
+                "legacy-current",
+                readFile(preferred_dir .. "/metadata.epub.lua")
+            )
+            assert.equals(
+                "legacy-old",
+                readFile(preferred_dir .. "/metadata.epub.lua.old")
+            )
+            assert.is_nil(readFile(legacy_path))
+            assert.equals(
+                "legacy-current",
+                readFile(legacy_path .. ".migrated-v0.0.8")
+            )
         end)
 
         it("should not reimport legacy metadata during canonical rotation", function()

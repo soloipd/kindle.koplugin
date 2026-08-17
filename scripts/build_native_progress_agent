@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SDK_STUB_DIR="$ROOT_DIR/agent/sdk-stubs/src"
+SOURCE="$ROOT_DIR/agent/src/KindlePluginReadingProgressAgentV7.java"
+MANIFEST="$ROOT_DIR/agent/manifest-progress-v7.mf"
+OUTPUT="${KINDLE_AGENT_OUTPUT:-$ROOT_DIR/bin/native-reading-progress-agent-v7.jar}"
+CLASS="KindlePluginReadingProgressAgentV7"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kindle-progress-agent.XXXXXX")"
+
+# shellcheck source=java_toolchain.sh
+source "$ROOT_DIR/scripts/java_toolchain.sh"
+JDK_BIN="$(kindle_find_jdk_bin)" || {
+    printf '%s\n' "A functional JDK 11+ with javac, javap, and deterministic jar support is required." >&2
+    exit 2
+}
+JAVAC_BIN="$JDK_BIN/javac"
+JAR_BIN="$JDK_BIN/jar"
+
+cleanup() {
+    rm -rf "$BUILD_DIR"
+}
+trap cleanup EXIT
+
+stub_sources=()
+while IFS= read -r -d '' stub_source; do
+    stub_sources+=("$stub_source")
+done < <(find "$SDK_STUB_DIR" -type f -name '*.java' -print0)
+if [ "${#stub_sources[@]}" -eq 0 ]; then
+    printf '%s\n' "Kindle SDK compile stubs not found in $SDK_STUB_DIR" >&2
+    exit 2
+fi
+
+"$JAVAC_BIN" --release 8 -proc:none -d "$BUILD_DIR" "$SOURCE" "${stub_sources[@]}"
+test -f "$BUILD_DIR/$CLASS.class"
+test -f "$BUILD_DIR/$CLASS\$1.class"
+shopt -s nullglob
+agent_classes=("$BUILD_DIR/$CLASS"*.class)
+jar_args=()
+for class_file in "${agent_classes[@]}"; do
+    jar_args+=(-C "$BUILD_DIR" "$(basename "$class_file")")
+done
+mkdir -p "$(dirname "$OUTPUT")"
+"$JAR_BIN" --create --file "$OUTPUT" --manifest "$MANIFEST" \
+    --date=1980-01-01T00:00:02Z "${jar_args[@]}"
+
+if [ "${KINDLE_AGENT_SKIP_CHECK:-0}" != "1" ]; then
+    "$ROOT_DIR/scripts/check_native_progress_agent"
+fi

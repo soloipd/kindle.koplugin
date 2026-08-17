@@ -51,4 +51,7 @@ jobs:
           java-version: "21"
 
       - name: Run DRM compatibility tests
-        run: python3 -m unittest discover -s python/tests -p 'test_*.py' -v
+        run: make test-python
+
+      - name: Verify native reading-progress agent
+        run: ./scripts/check_native_progress_agent

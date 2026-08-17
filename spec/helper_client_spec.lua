@@ -164,8 +164,10 @@ describe("HelperClient", function()
         end)
 
         it("should expose a native progress runner seam", function()
+            local seen_timeout
             local client = HelperClient:new({
-                native_progress_runner = function(asin, path, position)
+                native_progress_runner = function(asin, path, position, timeout_ms)
+                    seen_timeout = timeout_ms
                     return asin == "B007N6JEII" and path:match("%.kfx$")
                         and position.pid == 442741
                 end,
@@ -174,6 +176,8 @@ describe("HelperClient", function()
                 "B007N6JEII", "/mnt/us/documents/book.kfx",
                 { long = "ATwFAACbAAAA", pid = 442741 }
             ))
+            assert.equals(3000, seen_timeout)
+            assert.equals(3000, HelperClient.NATIVE_PROGRESS_SYNC_TIMEOUT_MS)
         end)
 
         it("should reject native progress paths outside the Kindle library", function()

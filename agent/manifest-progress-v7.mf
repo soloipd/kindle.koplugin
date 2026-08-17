@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Agent-Class: KindlePluginReadingProgressAgentV7
+Can-Redefine-Classes: false
+Can-Retransform-Classes: false
+Created-By: soloipd deterministic build

@@ -10,9 +10,11 @@
 ---   percent_finished (float 0-1), summary.status (string)
 
 local DocSettings = require("docsettings")
+local Event = require("ui/event")
 local ReadHistory = require("readhistory")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
+local buffer = require("string.buffer")
 local logger = require("logger")
 local T = require("ffi/util").template
 local BookList = require("ui/widget/booklist")
@@ -27,6 +29,8 @@ local ReadingPositionState = require("lua/lib/reading_position_state")
 local ReadingStateSync = {}
 local GOODREADS_PROGRESS_DIR =
     "/mnt/us/koreader/settings/goodreads_native_progress"
+local BACKGROUND_CLOSE_POLL_SECONDS = 0.125
+local BACKGROUND_CLOSE_TIMEOUT_SECONDS = 30
 
 ---
 --- Extracts book cdeKey (ASIN or PDOC hash) from virtual path.
@@ -146,6 +150,65 @@ local function validNativePosition(position)
         and position.pid == math.floor(position.pid)
 end
 
+local function copySimple(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return nil end
+    seen[value] = true
+    local copied = {}
+    for key, item in pairs(value) do
+        if type(key) == "string" or type(key) == "number" then
+            copied[key] = copySimple(item, seen)
+        end
+    end
+    seen[value] = nil
+    return copied
+end
+
+local function sameSimple(left, right, seen)
+    if type(left) ~= type(right) then return false end
+    if type(left) ~= "table" then return left == right end
+    seen = seen or {}
+    if seen[left] == right then return true end
+    seen[left] = right
+    for key, value in pairs(left) do
+        if not sameSimple(value, right[key], seen) then return false end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then return false end
+    end
+    return true
+end
+
+local function snapshotDocSettings(doc_settings, epub_path)
+    if type(doc_settings) ~= "table"
+        or type(doc_settings.readSetting) ~= "function"
+    then
+        return nil
+    end
+    local values = {}
+    for _, key in ipairs({
+        "percent_finished", "last_percent", "last_xpointer", "summary", "title",
+    }) do
+        values[key] = copySimple(doc_settings:readSetting(key))
+    end
+    local snapshot = {
+        data = {
+            doc_path = epub_path
+                or (doc_settings.data and doc_settings.data.doc_path),
+        },
+        values = values,
+    }
+    function snapshot:readSetting(key)
+        return self.values[key]
+    end
+    function snapshot:saveSetting(key, value)
+        self.values[key] = value
+    end
+    function snapshot:flush() end
+    return snapshot
+end
+
 local function canonicalPositionId(position)
     if not validNativePosition(position) then return nil end
     return position.long .. ":" .. tostring(position.pid)
@@ -159,6 +222,21 @@ local function boundedPercent(value, maximum)
     return percent
 end
 
+local function validPositionReceipt(receipt)
+    if receipt == nil then return true end
+    return validNativePosition(receipt)
+        and (receipt.percent == nil
+            or boundedPercent(receipt.percent, 100) ~= nil)
+        and (receipt.direction == nil
+            or receipt.direction == "push"
+            or receipt.direction == "pull"
+            or receipt.direction == "bootstrap")
+        and (receipt.synced_at == nil
+            or (type(receipt.synced_at) == "number"
+                and receipt.synced_at >= 0
+                and receipt.synced_at == math.floor(receipt.synced_at)))
+end
+
 local function validXPointer(value)
     return type(value) == "string"
         and value ~= ""
@@ -166,11 +244,29 @@ local function validXPointer(value)
         and value:find("[\r\n%z]") == nil
 end
 
+local function comparableXPointer(value)
+    if not validXPointer(value) then return nil end
+    -- KOReader may spell the first text node as either text() or text()[1].
+    -- They identify the same node, so do not start the packaged Python helper
+    -- merely to prove this harmless normalization difference.
+    return (value:gsub("text%(%)%[1%]", "text()"))
+end
+
+local function sameReceiptPosition(receipt, position)
+    return receipt and validNativePosition(position)
+        and receipt.long == position.long
+        and receipt.pid == position.pid
+end
+
 local function liveXPointerMatches(
     sync, epub_path, actual_xpointer, expected_xpointer, native_position
 )
     if not validXPointer(actual_xpointer) then return false end
-    if actual_xpointer == expected_xpointer then return true end
+    if comparableXPointer(actual_xpointer)
+        == comparableXPointer(expected_xpointer)
+    then
+        return true
+    end
     if not sync.helper_client
         or type(sync.helper_client.translatePosition) ~= "function"
     then
@@ -454,12 +550,20 @@ function ReadingStateSync:verifyOpenedKOReaderPosition(
         return false
     end
     if type(virtual_path) == "string" and virtual_path ~= "" then
-        local cache_ok = pcall(
-            BookList.setBookInfoCacheProperty,
-            virtual_path,
-            "percent_finished",
-            live_percent
-        )
+        local cache_ok = type(BookList.setBookInfoCache) == "function"
+            and pcall(
+                BookList.setBookInfoCache,
+                virtual_path,
+                reader.doc_settings
+            )
+        if not cache_ok then
+            cache_ok = pcall(
+                BookList.setBookInfoCacheProperty,
+                virtual_path,
+                "percent_finished",
+                live_percent
+            )
+        end
         if not cache_ok then
             logger.warn("KindlePlugin: KOReader shelf cache refresh failed")
         end
@@ -479,13 +583,20 @@ function ReadingStateSync:readGoodreadsProgress(cde_key, source_path)
     local path = self.goodreads_progress_dir .. "/" .. asin
     local attributes = lfs.attributes(path)
     local observed_at = attributes and tonumber(attributes.modification)
-    if not attributes or attributes.mode ~= "file" or not observed_at then
+    local size = attributes and tonumber(attributes.size)
+    if not attributes or attributes.mode ~= "file" or not observed_at
+        or not size or size ~= math.floor(size) or size < 1 or size > 4
+    then
         return nil
     end
-    local file = io.open(path, "r")
+    local file = io.open(path, "rb")
     if not file then return nil end
-    local line = file:read("*l")
+    -- Read one byte past the largest valid receipt so a concurrent append is
+    -- rejected without ever loading attacker-sized content into KOReader.
+    local line = file:read(5)
     file:close()
+    if type(line) ~= "string" or #line ~= size then return nil end
+    if line:sub(-1) == "\n" then line = line:sub(1, -2) end
     if type(line) ~= "string" or not line:match("^%d+$") then return nil end
     local percent = tonumber(line)
     if not percent or percent < 1 or percent > 100 then return nil end
@@ -666,7 +777,7 @@ function ReadingStateSync:observeClosePositionFacts(
         return nil
     end
     return ReadingPositionState.resolve(
-        state, { "koreader_live", "native" }, "native")
+        state, { "koreader_live", "native" }, "native"), local_position
 end
 
 --- Record an exact position only after both the authoritative LPR operation
@@ -731,12 +842,6 @@ function ReadingStateSync:recordPositionReceipt(
         self.plugin:saveSettings()
     end
     return true
-end
-
-local function sameReceiptPosition(receipt, position)
-    return receipt and validNativePosition(position)
-        and receipt.long == position.long
-        and receipt.pid == position.pid
 end
 
 --- Repair only cc.db's display percentage when the exact native LPR still
@@ -838,7 +943,9 @@ end
 --- Persist the exact KOReader XPointer through Kindle's native ReaderSDK.
 --- The visible catalog must only be advanced after this succeeds; otherwise
 --- the native reader would reopen its older LPR and overwrite the shelf value.
-function ReadingStateSync:saveAuthoritativeNativePosition(cde_key, source_path, epub_path, doc_settings)
+function ReadingStateSync:saveAuthoritativeNativePosition(
+    cde_key, source_path, epub_path, doc_settings, translated_position
+)
     local asin = cde_key
     if not asin or not asin:match("^B[A-Z0-9]+$") then
         asin = extractCdeKeyFromPath(source_path)
@@ -859,7 +966,10 @@ function ReadingStateSync:saveAuthoritativeNativePosition(cde_key, source_path, 
         return false
     end
 
-    local position = self.helper_client:translatePosition(epub_path, xpointer)
+    local position = translated_position
+    if not validNativePosition(position) then
+        position = self.helper_client:translatePosition(epub_path, xpointer)
+    end
     if not position then
         logger.warn("KindlePlugin: exact native position translation failed")
         return false
@@ -883,7 +993,9 @@ function ReadingStateSync:saveAuthoritativeNativePosition(cde_key, source_path, 
 end
 
 --- Resolve Kindle's exact local LPR back to a KOReader XPointer.
-function ReadingStateSync:getAuthoritativeKindleXPointer(cde_key, source_path, epub_path)
+function ReadingStateSync:getAuthoritativeKindleXPointer(
+    cde_key, source_path, epub_path, expected_position
+)
     local asin = cde_key
     if not asin or not asin:match("^B[A-Z0-9]+$") then
         asin = extractCdeKeyFromPath(source_path)
@@ -894,6 +1006,12 @@ function ReadingStateSync:getAuthoritativeKindleXPointer(cde_key, source_path, e
     local native, read_error = self.helper_client:readNativeProgress(asin, source_path)
     if not native then
         return nil, read_error
+    end
+    if sameReceiptPosition(expected_position, native) then
+        -- The ReaderSDK coordinate has not moved since our last verified
+        -- reconciliation. Preserve KOReader's sidecar without paying the
+        -- packaged helper's multi-second startup cost.
+        return nil, nil, native, true
     end
     local translated, translate_error = self.helper_client:translateNativePosition(
         epub_path, native.long
@@ -1237,8 +1355,81 @@ function ReadingStateSync:syncFromKindleAutomatic(
     -- A shelf percentage and cc.db timestamp are not authoritative positions.
     -- Compare the exact LPR with the last successfully reconciled coordinate;
     -- this detects native-reader movement even when catalog time is stale.
-    local exact_xpointer, _, native_position =
-        self:getAuthoritativeKindleXPointer(cde_key, source_path, epub_path)
+    local receipt = self:getPositionReceipt(cde_key, source_path)
+    local exact_xpointer, _, native_position, receipt_matches_native =
+        self:getAuthoritativeKindleXPointer(
+            cde_key, source_path, epub_path, receipt)
+
+    local function pushPersistedWinner(model_decision)
+        if not model_decision
+            or not model_decision.winner
+            or model_decision.winner.engine ~= "koreader_persisted"
+        then
+            return false
+        end
+        local expected_position = self:getCanonicalKOReaderPosition(
+            epub_path, doc_settings)
+        if canonicalPositionId(expected_position)
+            ~= model_decision.winner.position_id
+        then
+            logger.warn("KindlePlugin: saved position changed during open reconciliation")
+            return false
+        end
+        local sync_completed = false
+        local sync_details = {
+            book_title = self:getBookTitle(cde_key, doc_settings),
+            source_percent = kr_percent * 100,
+            dest_percent = kindle_state.percent_read,
+            source_time = kr_timestamp,
+            dest_time = kindle_state.timestamp,
+        }
+        self:syncIfApproved(false, true, function()
+            local recovery_at = os.time()
+            local native_percent, saved_position =
+                self:saveAuthoritativeNativePosition(
+                    cde_key, source_path, epub_path, doc_settings)
+            if not native_percent
+                or canonicalPositionId(saved_position)
+                    ~= model_decision.winner.position_id
+            then
+                logger.warn("KindlePlugin: exact saved-position recovery failed")
+                return
+            end
+            sync_completed = self:writeKindleState(
+                cde_key, source_path, native_percent,
+                recovery_at, kr_status)
+            if sync_completed then
+                self:recordPositionReceipt(
+                    cde_key, source_path, saved_position,
+                    "push", kr_status, recovery_at,
+                    "koreader_persisted", {
+                        native_percent = native_percent,
+                        koreader_percent = kr_percent * 100,
+                    })
+            end
+        end, sync_details)
+        return sync_completed
+    end
+
+    if receipt_matches_native then
+        self:repairCatalogFromReceipt(
+            cde_key, source_path, receipt, native_position, kindle_state)
+        local model_decision = self:observeOpenPositionFacts(
+            cde_key, source_path, doc_settings, epub_path,
+            kindle_state, native_position, kr_timestamp)
+        if model_decision and model_decision.action == "conflict" then
+            logger.warn("KindlePlugin: equal-time exact position conflict; keeping KOReader")
+            return false
+        end
+        if model_decision and model_decision.action == "apply"
+            and model_decision.winner
+            and model_decision.winner.engine == "koreader_persisted"
+        then
+            return pushPersistedWinner(model_decision)
+        end
+        logger.info("KindlePlugin: native LPR matches receipt; skipped coordinate translation")
+        return false
+    end
     if not exact_xpointer then
         logger.warn("KindlePlugin: exact native progress pull failed")
         return false
@@ -1324,7 +1515,6 @@ function ReadingStateSync:syncFromKindleAutomatic(
             }
         )
     end
-    local receipt = self:getPositionReceipt(cde_key, source_path)
     if sameReceiptPosition(receipt, native_position)
         and not self:isPositionSourceOfTruthEnabled()
     then
@@ -1382,48 +1572,7 @@ function ReadingStateSync:syncFromKindleAutomatic(
             return false
         end
         if model_decision.winner.engine == "koreader_persisted" then
-            local expected_position = self:getCanonicalKOReaderPosition(
-                epub_path, doc_settings)
-            if canonicalPositionId(expected_position)
-                ~= model_decision.winner.position_id
-            then
-                logger.warn("KindlePlugin: saved position changed during open reconciliation")
-                return false
-            end
-            local sync_completed = false
-            local sync_details = {
-                book_title = self:getBookTitle(cde_key, doc_settings),
-                source_percent = kr_percent * 100,
-                dest_percent = kindle_state.percent_read,
-                source_time = kr_timestamp,
-                dest_time = kindle_state.timestamp,
-            }
-            self:syncIfApproved(false, true, function()
-                local recovery_at = os.time()
-                local native_percent, saved_position =
-                    self:saveAuthoritativeNativePosition(
-                        cde_key, source_path, epub_path, doc_settings)
-                if not native_percent
-                    or canonicalPositionId(saved_position)
-                        ~= model_decision.winner.position_id
-                then
-                    logger.warn("KindlePlugin: exact saved-position recovery failed")
-                    return
-                end
-                sync_completed = self:writeKindleState(
-                    cde_key, source_path, native_percent,
-                    recovery_at, kr_status)
-                if sync_completed then
-                    self:recordPositionReceipt(
-                        cde_key, source_path, saved_position,
-                        "push", kr_status, recovery_at,
-                        "koreader_persisted", {
-                            native_percent = native_percent,
-                            koreader_percent = kr_percent * 100,
-                        })
-                end
-            end, sync_details)
-            return sync_completed
+            return pushPersistedWinner(model_decision)
         end
         if model_decision.winner.engine ~= "native" then return false end
     end
@@ -1510,6 +1659,252 @@ function ReadingStateSync:syncColdStartReader(ui)
     )
 end
 
+--- Silent close-time sync runs in a low-priority child so ReaderUI can finish
+--- closing immediately. Prompted sync remains in-process because UI choices
+--- must be made by the parent KOReader process.
+function ReadingStateSync:canSyncCloseInBackground()
+    return self:isAutomaticSyncEnabled()
+        and self.plugin.settings.enable_sync_to_kindle == true
+        and type(self.sync_direction) == "table"
+        and self.plugin.settings.sync_to_kindle_newer
+            == self.sync_direction.SILENT
+end
+
+function ReadingStateSync:_runBackgroundCloseTask(task, completed)
+    if type(self.background_process_runner) == "function" then
+        local ok, launched = pcall(
+            self.background_process_runner, task, completed)
+        return ok and launched ~= false
+    end
+
+    UIManager:preventStandby()
+    local pid, parent_read_fd = ffiUtil.runInSubProcess(
+        function(_, child_write_fd)
+            local task_ok, result = pcall(task)
+            if not task_ok or type(result) ~= "table" then
+                result = { worker_ok = false }
+            else
+                result.worker_ok = true
+            end
+            local encoded_ok, encoded = pcall(buffer.encode, result)
+            ffiUtil.writeToFD(
+                child_write_fd,
+                encoded_ok and encoded or "",
+                true
+            )
+        end,
+        true
+    )
+    if not pid then
+        UIManager:allowStandby()
+        logger.warn("KindlePlugin: could not start background close sync")
+        return false
+    end
+
+    local deadline = os.time() + BACKGROUND_CLOSE_TIMEOUT_SECONDS
+    local finished = false
+    local function finish(result)
+        if finished then return end
+        finished = true
+        UIManager:allowStandby()
+        local callback_ok = pcall(completed, result)
+        if not callback_ok then
+            logger.warn("KindlePlugin: background close-sync completion failed")
+        end
+    end
+    local function decodeResult(raw)
+        if type(raw) ~= "string" or raw == "" then return nil end
+        local decoded_ok, decoded = pcall(buffer.decode, raw)
+        if decoded_ok and type(decoded) == "table" then return decoded end
+        return nil
+    end
+    local function collectLater()
+        if ffiUtil.isSubProcessDone(pid) then
+            if parent_read_fd then
+                ffiUtil.readAllFromFD(parent_read_fd)
+                parent_read_fd = nil
+            end
+            return
+        end
+        UIManager:scheduleIn(1, collectLater)
+    end
+    local function poll()
+        local available = parent_read_fd
+            and ffiUtil.getNonBlockingReadSize(parent_read_fd) or 0
+        local process_done = ffiUtil.isSubProcessDone(pid)
+        if process_done or (available and available > 0) then
+            local raw = parent_read_fd
+                and ffiUtil.readAllFromFD(parent_read_fd) or ""
+            parent_read_fd = nil
+            if not process_done then UIManager:scheduleIn(1, collectLater) end
+            finish(decodeResult(raw))
+            return
+        end
+        if os.time() >= deadline then
+            logger.warn("KindlePlugin: background close sync exceeded its deadline")
+            ffiUtil.terminateSubProcess(pid)
+            UIManager:scheduleIn(1, collectLater)
+            finish(nil)
+            return
+        end
+        UIManager:scheduleIn(BACKGROUND_CLOSE_POLL_SECONDS, poll)
+    end
+    UIManager:scheduleIn(BACKGROUND_CLOSE_POLL_SECONDS, poll)
+    return true
+end
+
+function ReadingStateSync:_applyBackgroundCloseResult(request, result)
+    if type(result) ~= "table"
+        or result.worker_ok == false
+        or result.asin ~= request.asin
+        or not validPositionReceipt(result.receipt)
+        or (result.state ~= nil
+            and not ReadingPositionState.isValid(result.state))
+    then
+        return false, false
+    end
+    local settings = self.plugin and self.plugin.settings
+    if type(settings) ~= "table" then return false, false end
+    local current_receipt = settings.position_sync_receipts
+        and settings.position_sync_receipts[request.asin]
+    local current_state = settings.reading_position_states
+        and settings.reading_position_states[request.asin]
+    if not sameSimple(current_receipt, request.initial_receipt)
+        or not sameSimple(current_state, request.initial_state)
+    then
+        logger.info("KindlePlugin: ignored stale background close-sync state")
+        return false, true
+    end
+
+    local changed = false
+    if result.receipt ~= nil
+        and not sameSimple(current_receipt, result.receipt)
+    then
+        settings.position_sync_receipts = settings.position_sync_receipts or {}
+        settings.position_sync_receipts[request.asin] =
+            copySimple(result.receipt)
+        changed = true
+    end
+    if result.state ~= nil and not sameSimple(current_state, result.state) then
+        settings.reading_position_states = settings.reading_position_states or {}
+        settings.reading_position_states[request.asin] = copySimple(result.state)
+        changed = true
+    end
+    if changed and type(self.plugin.saveSettings) == "function" then
+        self.plugin:saveSettings()
+    end
+    return true, false
+end
+
+function ReadingStateSync:_finishBackgroundCloseSync(request, result)
+    if self.background_close_active ~= request then return end
+    self.background_close_active = nil
+    local _, stale_parent = self:_applyBackgroundCloseResult(request, result)
+    local should_retry = not stale_parent
+        and (type(result) ~= "table"
+            or result.worker_ok == false
+            or result.needs_retry == true)
+        and request.attempts < 2
+    if should_retry
+        and not self.background_close_pending[request.asin]
+    then
+        request.attempts = request.attempts + 1
+        self.background_close_sequence = self.background_close_sequence + 1
+        request.sequence = self.background_close_sequence
+        self.background_close_pending[request.asin] = request
+        logger.info("KindlePlugin: queued a transient close-sync retry")
+    end
+    self:_startNextBackgroundCloseSync()
+end
+
+function ReadingStateSync:_startNextBackgroundCloseSync()
+    if self.background_close_active then return true end
+    local selected_key
+    local selected
+    for key, request in pairs(self.background_close_pending or {}) do
+        if not selected or request.sequence < selected.sequence then
+            selected_key = key
+            selected = request
+        end
+    end
+    if not selected then return false end
+    self.background_close_pending[selected_key] = nil
+    self.background_close_active = selected
+
+    local settings = self.plugin.settings
+    selected.initial_receipt = copySimple(
+        settings.position_sync_receipts
+            and settings.position_sync_receipts[selected.asin])
+    selected.initial_state = copySimple(
+        settings.reading_position_states
+            and settings.reading_position_states[selected.asin])
+    local launched = self:_runBackgroundCloseTask(function()
+        local plugin = self.plugin
+        local original_save_settings = plugin.saveSettings
+        plugin.saveSettings = function() end
+        local call_ok, sync_completed = pcall(
+            self.syncToKindleAutomatic,
+            self,
+            selected.cde_key,
+            selected.source_path,
+            selected.doc_settings,
+            selected.epub_path
+        )
+        plugin.saveSettings = original_save_settings
+        local child_settings = plugin.settings
+        local state = child_settings.reading_position_states
+            and child_settings.reading_position_states[selected.asin]
+        local receipt = child_settings.position_sync_receipts
+            and child_settings.position_sync_receipts[selected.asin]
+        local live = state and state.observations
+            and state.observations.koreader_live
+        local acknowledged = state and state.acknowledged
+        local needs_retry = call_ok and sync_completed ~= true
+            and live ~= nil
+            and (not acknowledged
+                or acknowledged.position_id ~= live.position_id)
+        return {
+            asin = selected.asin,
+            success = call_ok and sync_completed == true,
+            needs_retry = needs_retry == true,
+            receipt = copySimple(receipt),
+            state = copySimple(state),
+        }
+    end, function(result)
+        self:_finishBackgroundCloseSync(selected, result)
+    end)
+    if not launched then
+        self:_finishBackgroundCloseSync(selected, nil)
+    end
+    return launched
+end
+
+--- Queue the latest immutable close snapshot. Jobs are globally serialized so
+--- Kindle receives at most one ReaderSDK attach request at a time; another
+--- close of the same book replaces its older queued snapshot.
+function ReadingStateSync:syncToKindleAutomaticInBackground(
+    cde_key, source_path, doc_settings, epub_path
+)
+    if not self:canSyncCloseInBackground() then return false end
+    local asin = receiptAsin(cde_key, source_path)
+    local snapshot = snapshotDocSettings(doc_settings, epub_path)
+    if not asin or not snapshot then return false end
+    self.background_close_pending = self.background_close_pending or {}
+    self.background_close_sequence =
+        (tonumber(self.background_close_sequence) or 0) + 1
+    self.background_close_pending[asin] = {
+        asin = asin,
+        cde_key = cde_key,
+        source_path = source_path,
+        epub_path = epub_path,
+        doc_settings = snapshot,
+        sequence = self.background_close_sequence,
+        attempts = 0,
+    }
+    self:_startNextBackgroundCloseSync()
+    return true
+end
+
 --- Sync KOReader state into Kindle's authoritative ReaderSDK state during close.
 --- This honors automatic-sync and all configured direction choices.
 function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settings, epub_path)
@@ -1529,7 +1924,7 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
         status = "",
         kindle_status = 0,
     }
-    local model_decision = self:observeClosePositionFacts(
+    local model_decision, local_position = self:observeClosePositionFacts(
         cde_key, source_path, doc_settings, epub_path,
         kindle_state, close_timestamp)
     if model_decision then
@@ -1571,7 +1966,7 @@ function ReadingStateSync:syncToKindleAutomatic(cde_key, source_path, doc_settin
         -- Always verify the exact LPR even when the rounded shelf percentage
         -- already matches; two positions inside one percentage point differ.
         local native_percent, native_position = self:saveAuthoritativeNativePosition(
-            cde_key, source_path, epub_path, doc_settings
+            cde_key, source_path, epub_path, doc_settings, local_position
         )
         if native_percent then
             sync_completed = self:writeKindleState(

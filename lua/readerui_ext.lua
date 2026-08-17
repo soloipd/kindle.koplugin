@@ -34,8 +34,20 @@ local function updateBookListCache(virtual_path, doc_settings)
     end
 
     local BookList = require("ui/widget/booklist")
-    logger.dbg("KindlePlugin: updating virtual BookList percentage")
-    BookList.setBookInfoCacheProperty(virtual_path, "percent_finished", percent_finished)
+    logger.dbg("KindlePlugin: updating complete virtual BookList metadata")
+    local cache_ok = type(BookList.setBookInfoCache) == "function"
+        and pcall(BookList.setBookInfoCache, virtual_path, doc_settings)
+    if not cache_ok then
+        -- Compatibility fallback for KOReader versions without the complete
+        -- cache API. A current KOReader uses setBookInfoCache so status and
+        -- annotation presence make the cached percentage durable.
+        pcall(
+            BookList.setBookInfoCacheProperty,
+            virtual_path,
+            "percent_finished",
+            percent_finished
+        )
+    end
 end
 
 ---
@@ -93,6 +105,22 @@ function ReaderUIExt:apply(ReaderUI)
                 local source_path = book and book.source_path
                 if cde_key or source_path then
                     logger.info("KindlePlugin: auto-syncing progress on book close")
+                    if type(self.reading_state_sync.canSyncCloseInBackground)
+                            == "function"
+                        and self.reading_state_sync:canSyncCloseInBackground()
+                        and type(self.reading_state_sync
+                            .syncToKindleAutomaticInBackground) == "function"
+                    then
+                        local queued = self.reading_state_sync
+                            :syncToKindleAutomaticInBackground(
+                            cde_key,
+                            source_path,
+                            reader_self.doc_settings,
+                            epub_path
+                        )
+                        if queued then return end
+                        logger.warn("KindlePlugin: background close sync unavailable")
+                    end
                     Trapper:wrap(function()
                         self.reading_state_sync:syncToKindleAutomatic(
                             cde_key,

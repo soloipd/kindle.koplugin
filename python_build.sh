@@ -39,22 +39,62 @@ OUTPUT_DIR="build"
 # Versions
 PYTHON_BUILD_STANDALONE_TAG="20260414"
 CPYTHON_VERSION="3.11.15"
+CPYTHON_TARBALL_SHA256="822b49f675b04581e4244136272c4662e8475c002e65c08a9f75911e0e935627"
 LXML_VERSION="6.0.3"
+LXML_WHEEL_URL="https://archive1.piwheels.org/simple/lxml/lxml-6.0.3-cp311-cp311-linux_armv7l.whl"
+LXML_WHEEL_SHA256="a212e799ad3eb9441327bf0199b11c91ab8bda77fa0a2b2c51ce0a4cd8deaeac"
 PILLOW_VERSION="12.2.0"
-PILLOW_BUILD_REVISION="bullseye1"
+PILLOW_BUILDER_IMAGE="arm32v7/debian:bullseye@sha256:b4ac940510634c13c9ce5b1124d2b5a90b5738408637e64e970fe927da895bed"
+GCC_BUILDER_IMAGE="arm32v7/gcc:12@sha256:02c806c776f0e182b77ace82aadd501dcd0be902650139b4c84fa12d22895771"
+DEBIAN_SNAPSHOT="20260803T000000Z"
+PILLOW_SOURCE_URL="https://files.pythonhosted.org/packages/8c/21/c2bcdd5906101a30244eaffc1b6e6ce71a31bd0742a01eb89e660ebfac2d/pillow-12.2.0.tar.gz"
+PILLOW_SOURCE_SHA256="a830b1a40919539d07806aa58e1b114df53ddd43213d9c8b75847eee6c0182b5"
+PILLOW_WHEEL_BASENAME="pillow-${PILLOW_VERSION}-cp311-cp311-linux_armv7l.whl"
+PYBIND11_VERSION="3.0.1"
+PYBIND11_WHEEL_URL="https://files.pythonhosted.org/packages/cd/8a/37362fc2b949d5f733a8b0f2ff51ba423914cabefe69f1d1b6aab710f5fe/pybind11-3.0.1-py3-none-any.whl"
+PYBIND11_WHEEL_SHA256="aa8f0aa6e0a94d3b64adfc38f560f33f15e589be2175e103c0a33c6bce55ee89"
 PYCRYPTODOME_VERSION="3.9.9"
+PYCRYPTODOME_WHEEL_URL="https://archive1.piwheels.org/simple/pycryptodome/pycryptodome-3.9.9-cp311-cp311-linux_armv7l.whl"
+PYCRYPTODOME_WHEEL_SHA256="2bd41fc16ee5e5c61098a29b2289334a572ed071b3f282a6fe0b9595dd53c22e"
+BEAUTIFULSOUP_VERSION="4.14.3"
+BEAUTIFULSOUP_WHEEL_URL="https://files.pythonhosted.org/packages/1a/39/47f9197bdd44df24d67ac8893641e16f386c984a0619ef2ee4c51fbbc019/beautifulsoup4-4.14.3-py3-none-any.whl"
+BEAUTIFULSOUP_WHEEL_SHA256="0918bfe44902e6ad8d57732ba310582e98da931428d231a5ecb9e7c703a735bb"
 SOUPSIEVE_VERSION="2.8.1"
+SOUPSIEVE_WHEEL_URL="https://files.pythonhosted.org/packages/48/f3/b67d6ea49ca9154453b6d70b34ea22f3996b9fa55da105a79d8732227adc/soupsieve-2.8.1-py3-none-any.whl"
+SOUPSIEVE_WHEEL_SHA256="a11fe2a6f3d76ab3cf2de04eb339c1be5b506a8a47f2ceb6d139803177f85434"
+
+verify_sha256() {
+    file="$1"
+    expected="$2"
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$file" | awk '{print $1}')"
+    else
+        actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "SHA-256 mismatch: $file" >&2
+        return 1
+    fi
+}
 
 build_arm_image() {
-    image_tag="$1"
-    dockerfile="$2"
+    local image_tag="$1"
+    local dockerfile="$2"
+    local build_context
+    local build_status=0
+
+    # Neither wrapper Dockerfile consumes checkout files. An exclusive empty
+    # context prevents Git history, generated archives, and untracked local
+    # material from being uploaded to the configured Docker daemon.
+    build_context="$(mktemp -d "${TMPDIR:-/tmp}/kindle-wrapper-context.XXXXXX")" \
+        || return 1
     if docker buildx version >/dev/null 2>&1; then
         docker buildx build \
             --platform linux/arm/v7 \
             -t "$image_tag" \
             -f "$dockerfile" \
             --load \
-            .
+            "$build_context" || build_status=$?
     else
         # Docker Desktop installations without the optional buildx CLI still
         # expose multi-platform support through the legacy build command.
@@ -62,46 +102,95 @@ build_arm_image() {
             --platform linux/arm/v7 \
             -t "$image_tag" \
             -f "$dockerfile" \
-            .
+            "$build_context" || build_status=$?
     fi
+    rmdir "$build_context" || return 1
+    return "$build_status"
 }
 
 build_pillow_arm_assets() {
-    python_dist="$1"
+    python_dist="$(cd "$1" && pwd)"
     asset_dir="$2"
-    if compgen -G "$asset_dir/[Pp]illow-*.whl" >/dev/null \
-        && [ -f "$asset_dir/.stamp" ]; then
-        return
-    fi
+    expected_wheel="$asset_dir/$PILLOW_WHEEL_BASENAME"
+    ca_bundle="$python_dist/lib/python3.11/site-packages/pip/_vendor/certifi/cacert.pem"
+    crypto_source="$SCRIPT_DIR/lib/crypto_hook.c"
+    test -f "$ca_bundle"
+    test -f "$crypto_source"
 
+    source_archive="$CACHE_DIR/pillow-${PILLOW_VERSION}.tar.gz"
+    if [ ! -f "$source_archive" ]; then
+        curl -fSL --progress-bar -o "$source_archive" "$PILLOW_SOURCE_URL"
+    fi
+    verify_sha256 "$source_archive" "$PILLOW_SOURCE_SHA256"
+    pybind11_wheel="$CACHE_DIR/pybind11-${PYBIND11_VERSION}-py3-none-any.whl"
+    if [ ! -f "$pybind11_wheel" ]; then
+        curl -fSL --progress-bar -o "$pybind11_wheel" "$PYBIND11_WHEEL_URL"
+    fi
+    verify_sha256 "$pybind11_wheel" "$PYBIND11_WHEEL_SHA256"
+
+    rm -rf "$asset_dir"
     mkdir -p "$asset_dir"
     docker run --rm --platform linux/arm/v7 \
-        -e "PILLOW_VERSION=$PILLOW_VERSION" \
+        -e "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
+        -e "PYBIND11_VERSION=$PYBIND11_VERSION" \
         -v "$(cd "$python_dist" && pwd):/python:ro" \
+        -v "$(cd "$(dirname "$source_archive")" && pwd)/$(basename "$source_archive"):/src/pillow.tar.gz:ro" \
+        -v "$(cd "$(dirname "$pybind11_wheel")" && pwd)/$(basename "$pybind11_wheel"):/src/pybind11-${PYBIND11_VERSION}-py3-none-any.whl:ro" \
+        -v "$ca_bundle:/etc/ssl/certs/ca-certificates.crt:ro" \
+        -v "$crypto_source:/src/crypto_hook.c:ro" \
         -v "$(cd "$asset_dir" && pwd):/out" \
-        arm32v7/debian:bullseye bash -c '
-set -e
-apt-get update >/dev/null
+        "$PILLOW_BUILDER_IMAGE" bash -c '
+set -eu
+printf "%s\n" \
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bullseye main" \
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bullseye-updates main" \
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ bullseye-security main" \
+    > /etc/apt/sources.list
+rm -f /etc/apt/sources.list.d/*
+apt-get -o Acquire::Check-Valid-Until=false update >/dev/null
 apt-get install -y --no-install-recommends \
-    build-essential ca-certificates libfreetype6-dev libjpeg62-turbo-dev \
-    liblcms2-dev libopenjp2-7-dev libtiff-dev libwebp-dev libxcb1-dev \
-    zlib1g-dev >/dev/null
-/python/bin/python3.11 -m pip wheel --no-cache-dir --no-deps \
-    --no-binary=Pillow --wheel-dir /out "Pillow==$PILLOW_VERSION"
+    build-essential=12.9 \
+    libfreetype6-dev=2.10.4+dfsg-1+deb11u2 \
+    libjpeg62-turbo-dev=1:2.0.6-4 \
+    liblcms2-dev=2.12~rc1-2+deb11u1 \
+    libopenjp2-7-dev=2.4.0-3+deb11u3 \
+    libtiff-dev=4.2.0-1+deb11u8 \
+    libwebp-dev=0.6.1-2.1+deb11u2 \
+    libxcb1-dev=1.14-3 \
+    zlib1g-dev=1:1.2.11.dfsg-2+deb11u2 \
+    libxml2=2.9.10+dfsg-6.7+deb11u10 \
+    libxslt1.1=1.1.34-4+deb11u3 >/dev/null
+mkdir -p /build-deps
+/python/bin/python3.11 -m pip install --no-cache-dir --no-deps --no-index \
+    --target /build-deps /src/pybind11-${PYBIND11_VERSION}-py3-none-any.whl
+PYTHONPATH=/build-deps /python/bin/python3.11 -m pip wheel --no-cache-dir --no-deps \
+    --no-binary=Pillow --no-index --no-build-isolation \
+    --wheel-dir /out /src/pillow.tar.gz
+gcc -shared -fPIC -O2 -o /out/crypto_hook.so /src/crypto_hook.c -ldl -lpthread
+strip /out/crypto_hook.so
 mkdir -p /out/libs
 for lib in \
     libXau.so.6 libXdmcp.so.6 libbrotlicommon.so.1 libbrotlidec.so.1 \
     libbsd.so.0 libdeflate.so.0 libfreetype.so.6 libjbig.so.0 \
     libjpeg.so.62 liblcms2.so.2 liblzma.so.5 libmd.so.0 \
     libopenjp2.so.7 libpng16.so.16 libtiff.so.5 libwebp.so.6 \
-    libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1
+    libwebpdemux.so.2 libwebpmux.so.3 libxcb.so.1 libz.so.1 libzstd.so.1 \
+    libxml2.so.2 libxslt.so.1 libexslt.so.0 libgcrypt.so.20 \
+    libgpg-error.so.0 libicuuc.so.67 libicudata.so.67
 do
-    cp -L /usr/lib/arm-linux-gnueabihf/$lib /out/libs/ 2>/dev/null \
-        || cp -L /lib/arm-linux-gnueabihf/$lib /out/libs/ 2>/dev/null \
-        || true
+    if [ -f /usr/lib/arm-linux-gnueabihf/$lib ]; then
+        cp -L /usr/lib/arm-linux-gnueabihf/$lib /out/libs/
+    elif [ -f /lib/arm-linux-gnueabihf/$lib ]; then
+        cp -L /lib/arm-linux-gnueabihf/$lib /out/libs/
+    else
+        echo "missing required Pillow runtime library: $lib" >&2
+        exit 1
+    fi
 done
-touch /out/.stamp
 '
+    test -f "$expected_wheel"
+    test -f "$asset_dir/crypto_hook.so"
+    test -f "$asset_dir/libs/libxml2.so.2"
 }
 
 echo "=== Kindle Helper Build (download-based) ==="
@@ -117,92 +206,67 @@ STAGING="$OUTPUT_DIR/kindle.koplugin"
 mkdir -p "$STAGING"
 
 # ---------------------------------------------------------------------------
-# Steps 1-2: CPython + packages (cached in build-cache/)
+# Steps 1-2: CPython + packages
 #
-# The cache is keyed on all version pins.  If the versions haven't changed,
-# we skip downloading and installing — just copy from the cache.
+# Download archives may be reused only after their hashes are verified. The
+# executable runtime and compiled assets are rebuilt into the freshly cleared
+# output directory every time; no writable marker can bless an older tree.
 # ---------------------------------------------------------------------------
 CACHE_DIR="build-cache"
-CACHE_KEY="cpython-${CPYTHON_VERSION}+${PYTHON_BUILD_STANDALONE_TAG}_lxml-${LXML_VERSION}_pillow-${PILLOW_VERSION}-${PILLOW_BUILD_REVISION}_pycrypto-${PYCRYPTODOME_VERSION}"
-CACHE_STAMP="$CACHE_DIR/$CACHE_KEY/.stamp"
+mkdir -p "$CACHE_DIR"
 
-if [ -f "$CACHE_STAMP" ]; then
-    echo "[1/5] CPython $CPYTHON_VERSION — cached"
-    echo "[2/5] Packages — cached"
-    cp -a "$CACHE_DIR/$CACHE_KEY/dist" "$OUTPUT_DIR/dist"
-else
-    mkdir -p "$CACHE_DIR/$CACHE_KEY"
-
-    # --- Step 1: Download CPython ---
-    echo "[1/5] Downloading CPython $CPYTHON_VERSION (armv7)..."
-
-    CPYTHON_TARBALL="$CACHE_DIR/cpython-${CPYTHON_VERSION}+${PYTHON_BUILD_STANDALONE_TAG}.tar.gz"
-    CPYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD_STANDALONE_TAG}/cpython-${CPYTHON_VERSION}%2B${PYTHON_BUILD_STANDALONE_TAG}-armv7-unknown-linux-gnueabihf-install_only.tar.gz"
-
-    if [ ! -f "$CPYTHON_TARBALL" ]; then
-        curl -fSL --progress-bar -o "$CPYTHON_TARBALL" "$CPYTHON_URL"
-    fi
-
-    echo "  Extracting..."
-    mkdir -p "$CACHE_DIR/$CACHE_KEY/dist"
-    tar xzf "$CPYTHON_TARBALL" -C "$CACHE_DIR/$CACHE_KEY/dist" --strip-components=1
-    echo "  OK: $(ls "$CACHE_DIR/$CACHE_KEY/dist/bin/python3")"
-
-    # --- Step 2: Install packages ---
-    echo "[2/5] Installing packages..."
-
-    CACHE_DIST="$CACHE_DIR/$CACHE_KEY/dist"
-    SITE_PACKAGES="$CACHE_DIST/lib/python3.11/site-packages"
-    mkdir -p "$SITE_PACKAGES"
-
-    # lxml — available on PyPI as manylinux_2_31_armv7l
-    echo "  lxml $LXML_VERSION (PyPI)..."
-    curl -fSL -o /tmp/lxml.whl "https://files.pythonhosted.org/packages/$(pip3 index versions lxml 2>/dev/null | head -1 || echo 'cp311/cp311-manylinux_2_31_armv7l')/lxml-${LXML_VERSION}-cp311-cp311-manylinux_2_31_armv7l.whl" 2>/dev/null || {
-        echo "  Trying piwheels fallback..."
-        curl -fSL -o /tmp/lxml.whl "https://archive1.piwheels.org/simple/lxml/lxml-${LXML_VERSION}-cp311-cp311-linux_armv7l.whl"
-    }
-    unzip -q -o /tmp/lxml.whl -d "$SITE_PACKAGES"
-
-    # Pillow — compile against Bullseye instead of bundling a piwheels wheel
-    # linked to a newer glibc. Kindle's /mnt/us is not the compatibility issue;
-    # every bundled ELF dependency must run on the firmware's older userspace.
-    echo "  Pillow $PILLOW_VERSION (Bullseye ARM build)..."
-    PILLOW_ASSET_DIR="$CACHE_DIR/pillow-${PILLOW_VERSION}-cp311-armv7-${PILLOW_BUILD_REVISION}"
-    build_pillow_arm_assets "$CACHE_DIST" "$PILLOW_ASSET_DIR"
-    unzip -q -o "$PILLOW_ASSET_DIR"/[Pp]illow-*.whl -d "$SITE_PACKAGES"
-
-    # pycryptodome — piwheels (archive for older versions)
-    echo "  pycryptodome $PYCRYPTODOME_VERSION (piwheels)..."
-    curl -fSL -o /tmp/pycryptodome.whl "https://archive1.piwheels.org/simple/pycryptodome/pycryptodome-${PYCRYPTODOME_VERSION}-cp311-cp311-linux_armv7l.whl"
-    unzip -q -o /tmp/pycryptodome.whl -d "$SITE_PACKAGES"
-
-    # beautifulsoup4 — pure Python, download from PyPI as universal wheel
-    echo "  beautifulsoup4..."
-    rm -rf /tmp/bs4dl && mkdir -p /tmp/bs4dl
-    pip3 download --only-binary=:all: --python-version 3.11 --no-deps --dest /tmp/bs4dl beautifulsoup4 2>/dev/null
-    unzip -q -o /tmp/bs4dl/beautifulsoup4*.whl -d "$SITE_PACKAGES"
-
-    touch "$CACHE_STAMP"
-    echo "  Cached to $CACHE_DIR/$CACHE_KEY/"
-
-    # Copy to output
-    cp -a "$CACHE_DIR/$CACHE_KEY/dist" "$OUTPUT_DIR/dist"
+echo "[1/5] Preparing verified CPython $CPYTHON_VERSION (armv7)..."
+CPYTHON_TARBALL="$CACHE_DIR/cpython-${CPYTHON_VERSION}+${PYTHON_BUILD_STANDALONE_TAG}.tar.gz"
+CPYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_BUILD_STANDALONE_TAG}/cpython-${CPYTHON_VERSION}%2B${PYTHON_BUILD_STANDALONE_TAG}-armv7-unknown-linux-gnueabihf-install_only.tar.gz"
+if [ ! -f "$CPYTHON_TARBALL" ]; then
+    curl -fSL --progress-bar -o "$CPYTHON_TARBALL" "$CPYTHON_URL"
 fi
+verify_sha256 "$CPYTHON_TARBALL" "$CPYTHON_TARBALL_SHA256"
 
 DIST_DIR="$OUTPUT_DIR/dist"
+mkdir -p "$DIST_DIR"
+tar xzf "$CPYTHON_TARBALL" -C "$DIST_DIR" --strip-components=1
+test -x "$DIST_DIR/bin/python3"
+
+echo "[2/5] Installing verified packages..."
 SITE_PACKAGES="$DIST_DIR/lib/python3.11/site-packages"
+mkdir -p "$SITE_PACKAGES"
+
+LXML_WHEEL="$CACHE_DIR/lxml-${LXML_VERSION}-cp311-cp311-linux_armv7l.whl"
+if [ ! -f "$LXML_WHEEL" ]; then
+    curl -fSL --progress-bar -o "$LXML_WHEEL" "$LXML_WHEEL_URL"
+fi
+verify_sha256 "${LXML_WHEEL}" "${LXML_WHEEL_SHA256}"
+unzip -q -o "$LXML_WHEEL" -d "$SITE_PACKAGES"
+
+# Pillow is compiled in a fresh Bullseye container so neither a cached wheel
+# nor a newer host glibc can enter the release.
+PILLOW_ASSET_DIR="$OUTPUT_DIR/.pillow-assets"
+build_pillow_arm_assets "$DIST_DIR" "$PILLOW_ASSET_DIR"
+unzip -q -o "$PILLOW_ASSET_DIR/$PILLOW_WHEEL_BASENAME" -d "$SITE_PACKAGES"
+
+PYCRYPTODOME_WHEEL="$CACHE_DIR/pycryptodome-${PYCRYPTODOME_VERSION}-cp311-cp311-linux_armv7l.whl"
+if [ ! -f "$PYCRYPTODOME_WHEEL" ]; then
+    curl -fSL --progress-bar -o "$PYCRYPTODOME_WHEEL" "$PYCRYPTODOME_WHEEL_URL"
+fi
+verify_sha256 "${PYCRYPTODOME_WHEEL}" "${PYCRYPTODOME_WHEEL_SHA256}"
+unzip -q -o "$PYCRYPTODOME_WHEEL" -d "$SITE_PACKAGES"
+
+BEAUTIFULSOUP_WHEEL="$CACHE_DIR/beautifulsoup4-${BEAUTIFULSOUP_VERSION}-py3-none-any.whl"
+if [ ! -f "$BEAUTIFULSOUP_WHEEL" ]; then
+    curl -fSL --progress-bar -o "$BEAUTIFULSOUP_WHEEL" "$BEAUTIFULSOUP_WHEEL_URL"
+fi
+verify_sha256 "${BEAUTIFULSOUP_WHEEL}" "${BEAUTIFULSOUP_WHEEL_SHA256}"
+unzip -q -o "$BEAUTIFULSOUP_WHEEL" -d "$SITE_PACKAGES"
 
 # BeautifulSoup imports its CSS adapter during normal kfxlib startup. The
 # adapter warns on stderr when soupsieve is absent, which would corrupt the
 # helper's JSON-only process protocol even when CSS selectors are not used.
 SOUPSIEVE_WHEEL="$CACHE_DIR/soupsieve-${SOUPSIEVE_VERSION}-py3-none-any.whl"
 if [ ! -f "$SOUPSIEVE_WHEEL" ]; then
-    pip3 download \
-        --only-binary=:all: \
-        --no-deps \
-        --dest "$CACHE_DIR" \
-        "soupsieve==$SOUPSIEVE_VERSION"
+    curl -fSL --progress-bar -o "$SOUPSIEVE_WHEEL" "$SOUPSIEVE_WHEEL_URL"
 fi
+verify_sha256 "${SOUPSIEVE_WHEEL}" "${SOUPSIEVE_WHEEL_SHA256}"
 unzip -q -o "$SOUPSIEVE_WHEEL" -d "$SITE_PACKAGES"
 
 # ---------------------------------------------------------------------------
@@ -254,22 +318,15 @@ find "$DIST_DIR/lib/python3.11" -name "tests" -exec rm -rf {} + 2>/dev/null || t
 find "$DIST_DIR/lib/python3.11" -name "test" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Strip debug symbols from the Python binary (27MB -> ~7MB)
-docker run --rm --platform linux/arm/v7 -v "$(cd "$DIST_DIR" && pwd)/bin:/mnt" arm32v7/gcc:12 strip /mnt/python3
+docker run --rm --platform linux/arm/v7 \
+    -v "$(cd "$DIST_DIR" && pwd)/bin:/mnt" \
+    "$GCC_BUILDER_IMAGE" strip /mnt/python3
 
 # Bundle the exact Bullseye runtime libraries used to compile Pillow.
 echo "  Bundling shared libs for Pillow..."
 mkdir -p "$DIST_DIR/lib/external"
-PILLOW_ASSET_DIR="$CACHE_DIR/pillow-${PILLOW_VERSION}-cp311-armv7-${PILLOW_BUILD_REVISION}"
-build_pillow_arm_assets "$DIST_DIR" "$PILLOW_ASSET_DIR"
 cp -a "$PILLOW_ASSET_DIR/libs/." "$DIST_DIR/lib/external/"
-
-# lxml's Bookworm libraries require glibc 2.36. Kindle firmware in the field
-# includes 2.35 and older, so bundle the same ABI names from Bullseye instead.
-LXML_RUNTIME_TAG="kindle-lxml-runtime-builder"
-build_arm_image "$LXML_RUNTIME_TAG" .github/Dockerfile.lxml-runtime
-LXML_RUNTIME_CID=$(docker create "$LXML_RUNTIME_TAG")
-docker cp "$LXML_RUNTIME_CID:/out/." "$DIST_DIR/lib/external/"
-docker rm "$LXML_RUNTIME_CID"
+cp "$PILLOW_ASSET_DIR/crypto_hook.so" "$OUTPUT_DIR/crypto_hook.so"
 
 # Strip unnecessary Crypto modules
 rm -rf "$SITE_PACKAGES/Crypto/SelfTest"
@@ -297,18 +354,6 @@ docker cp "$CONTAINER_ID:/build/kindle-helper" "$OUTPUT_DIR/kindle-helper"
 docker cp "$CONTAINER_ID:/build/libsyscall_wrapper.so" "$OUTPUT_DIR/libsyscall_wrapper.so"
 docker rm "$CONTAINER_ID"
 
-# Build crypto_hook.so against old glibc (Bullseye = glibc 2.31)
-# This .so is LD_PRELOADed into the Kindle's JVM, so it must not
-# require glibc symbols newer than what older Kindle devices ship.
-echo "  Building crypto_hook.so (old glibc)..."
-CRYPTO_HOOK_TAG="kindle-crypto-hook-builder"
-
-build_arm_image "$CRYPTO_HOOK_TAG" .github/Dockerfile.crypto_hook
-
-CRYPTO_CID=$(docker create "$CRYPTO_HOOK_TAG")
-docker cp "$CRYPTO_CID:/build/crypto_hook.so" "$OUTPUT_DIR/crypto_hook.so"
-docker rm "$CRYPTO_CID"
-
 chmod +x "$OUTPUT_DIR/kindle-helper"
 
 # ---------------------------------------------------------------------------
@@ -316,9 +361,21 @@ chmod +x "$OUTPUT_DIR/kindle-helper"
 # ---------------------------------------------------------------------------
 echo "[5/5] Packaging..."
 
+# Rebuild and compare the privileged Java agent inside this packaging
+# transaction, then stage only that freshly verified artifact. A stale or
+# locally replaced prebuilt JAR can no longer pass through to the release ZIP.
+VERIFIED_AGENT_JAR="$SCRIPT_DIR/$OUTPUT_DIR/native-reading-progress-agent-v7.jar"
+KINDLE_AGENT_VERIFIED_OUTPUT="$VERIFIED_AGENT_JAR" \
+    ./scripts/check_native_progress_agent
+test -f "$VERIFIED_AGENT_JAR"
+
 # Copy Lua plugin files
 cp -r lua/ "$STAGING/lua/"
-cp -r bin/ "$STAGING/bin/"
+mkdir -p "$STAGING/bin/classes"
+cp bin/sync-native-progress "$STAGING/bin/"
+cp "$VERIFIED_AGENT_JAR" "$STAGING/bin/native-reading-progress-agent-v7.jar"
+cp bin/classes/AttachLauncher.class "$STAGING/bin/classes/"
+chmod 0755 "$STAGING/bin/sync-native-progress"
 cp main.lua "$STAGING/"
 cp _meta.lua "$STAGING/"
 cp -r patches/ "$STAGING/patches/" 2>/dev/null || true
@@ -353,15 +410,18 @@ test -f "$STAGING/dist/lib/external/libgcrypt.so.20"
 test -f "$STAGING/dist/lib/external/libtiff.so.5"
 test ! -f "$STAGING/dist/lib/external/libtiff.so.6"
 test -x "$STAGING/bin/sync-native-progress"
-test -f "$STAGING/bin/native-reading-progress-agent-v6.jar"
+test -f "$STAGING/bin/native-reading-progress-agent-v7.jar"
 test -f "$STAGING/bin/classes/AttachLauncher.class"
+test ! -e "$STAGING/bin/native-reading-progress-agent-v2.jar"
+test ! -e "$STAGING/bin/native-reading-progress-agent-v3.jar"
+test ! -e "$STAGING/bin/native-reading-progress-agent-v6.jar"
 test ! -d "$STAGING/dist/dist"
 
 # Exercise Pillow under the oldest supported build userspace. This catches a
 # newer GLIBC symbol in either the wheel or one of its copied dependencies.
 docker run --rm --platform linux/arm/v7 \
     -v "$(cd "$STAGING/dist" && pwd):/runtime:ro" \
-    arm32v7/debian:bullseye bash -c '
+    "$PILLOW_BUILDER_IMAGE" bash -c '
 set -e
 export LD_LIBRARY_PATH=/runtime/lib/external
 /runtime/bin/python3 -c "from PIL import Image; assert Image.new(\"RGB\", (2, 2)).size == (2, 2)"

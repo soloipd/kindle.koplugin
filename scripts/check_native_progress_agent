@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+JAR="$ROOT_DIR/bin/native-reading-progress-agent-v7.jar"
+CLASS="KindlePluginReadingProgressAgentV7"
+CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kindle-progress-agent-check.XXXXXX")"
+CURRENT_DIR="$CHECK_DIR/current"
+REBUILT_DIR="$CHECK_DIR/rebuilt"
+REBUILT_JAR="$CHECK_DIR/rebuilt.jar"
+
+# shellcheck source=java_toolchain.sh
+source "$ROOT_DIR/scripts/java_toolchain.sh"
+JDK_BIN="$(kindle_find_jdk_bin)" || {
+    printf '%s\n' "A functional JDK 11+ with deterministic jar support is required." >&2
+    exit 2
+}
+JAR_BIN="$JDK_BIN/jar"
+JAVAP_BIN="$JDK_BIN/javap"
+
+cleanup() {
+    rm -rf "$CHECK_DIR"
+}
+trap cleanup EXIT
+
+test -f "$JAR"
+mkdir -p "$CURRENT_DIR" "$REBUILT_DIR"
+(
+    cd "$CURRENT_DIR"
+    "$JAR_BIN" xf "$JAR"
+)
+grep -Fq "Agent-Class: $CLASS" \
+    "$CURRENT_DIR/META-INF/MANIFEST.MF"
+current_classes="$("$JAR_BIN" tf "$JAR" | grep -E "^$CLASS(\\\$[^/]+)?\\.class$" | LC_ALL=C sort)"
+printf '%s\n' "$current_classes" | grep -Fxq "$CLASS.class"
+printf '%s\n' "$current_classes" | grep -Fxq "$CLASS\$1.class"
+"$JAVAP_BIN" -private -constants -classpath "$JAR" "$CLASS" \
+    | grep -Fq "DEFAULT_SYNC_TIMEOUT_MS = 3000"
+"$JAVAP_BIN" -private -constants -classpath "$JAR" "$CLASS" \
+    | grep -Fq "DEFAULT_REQUEST_TIMEOUT_MS = 10000"
+
+KINDLE_JDK_BIN="$JDK_BIN" KINDLE_AGENT_OUTPUT="$REBUILT_JAR" KINDLE_AGENT_SKIP_CHECK=1 \
+    "$ROOT_DIR/scripts/build_native_progress_agent"
+(
+    cd "$REBUILT_DIR"
+    "$JAR_BIN" xf "$REBUILT_JAR"
+)
+rebuilt_classes="$("$JAR_BIN" tf "$REBUILT_JAR" | grep -E "^$CLASS(\\\$[^/]+)?\\.class$" | LC_ALL=C sort)"
+test "$current_classes" = "$rebuilt_classes"
+while IFS= read -r class_file; do
+    test -n "$class_file"
+    cmp -s "$CURRENT_DIR/$class_file" "$REBUILT_DIR/$class_file"
+done <<EOF
+$current_classes
+EOF
+cmp -s "$JAR" "$REBUILT_JAR"
+
+if [ -n "${KINDLE_AGENT_VERIFIED_OUTPUT:-}" ]; then
+    verified_output="$KINDLE_AGENT_VERIFIED_OUTPUT"
+    mkdir -p "$(dirname "$verified_output")"
+    verified_temp="$verified_output.$$"
+    cp "$REBUILT_JAR" "$verified_temp"
+    mv -f "$verified_temp" "$verified_output"
+fi
+
+grep -Fq 'native-reading-progress-agent-v7.jar' \
+    "$ROOT_DIR/bin/sync-native-progress"
+grep -Fq 'ATTACH_TIMEOUT_SECONDS=12' \
+    "$ROOT_DIR/bin/sync-native-progress"
+grep -Fq 'RESULT_POLL_ATTEMPTS=12' \
+    "$ROOT_DIR/bin/sync-native-progress"
+grep -Fq 'native-reading-progress-agent-v7.jar' \
+    "$ROOT_DIR/python_build.sh"
+grep -Fq 'NATIVE_PROGRESS_SYNC_TIMEOUT_MS = 3000' \
+    "$ROOT_DIR/lua/helper_client.lua"
+
+printf '%s\n' "native reading-progress agent checks passed"

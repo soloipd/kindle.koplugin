@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${KINDLE_TEST_PYTHON:-python3}"
+
+# shellcheck source=java_toolchain.sh
+source "$ROOT_DIR/scripts/java_toolchain.sh"
+
+python_runtime_is_complete() {
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 \
+        && "$PYTHON_BIN" -c '
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit(1)
+import tomllib
+import bs4
+import Crypto
+import lxml
+import PIL
+import pypdf
+' >/dev/null 2>&1
+}
+
+jdk_bin="$(kindle_find_jdk_bin || true)"
+if python_runtime_is_complete && [ -n "$jdk_bin" ]; then
+    export PATH="$jdk_bin:$PATH"
+    exec "$PYTHON_BIN" -m unittest discover \
+        -s "$ROOT_DIR/python/tests" -p 'test_*.py' -v
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    printf '%s\n' \
+        "Python 3.11+ (with TOML/test dependencies) and a JDK are required." \
+        "Install them or install Docker, then run this command again." >&2
+    exit 2
+fi
+
+BUILD_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/kindle-python-test-context.XXXXXX")"
+cleanup_build_context() {
+    if [ -n "$BUILD_CONTEXT" ]; then
+        rmdir "$BUILD_CONTEXT" 2>/dev/null || true
+    fi
+}
+trap cleanup_build_context EXIT HUP INT TERM
+
+# Dockerfile.python-tests imports only from its pinned base-image stage. Give
+# the daemon an empty context so local Git history and untracked files never
+# cross the client/daemon boundary.
+docker build \
+    -f "$ROOT_DIR/.github/Dockerfile.python-tests" \
+    -t kindle-koplugin-python-tests:py311-jdk21 \
+    "$BUILD_CONTEXT"
+rmdir "$BUILD_CONTEXT"
+BUILD_CONTEXT=""
+exec docker run --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec \
+    -e PYTHONDONTWRITEBYTECODE=1 \
+    -v "$ROOT_DIR:/work:ro" \
+    kindle-koplugin-python-tests:py311-jdk21

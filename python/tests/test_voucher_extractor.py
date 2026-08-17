@@ -21,7 +21,26 @@ public class VoucherExtractorAccountSecretHarness {
 """
 
 
-@unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "Java toolchain is required")
+def java_tool_works(name):
+    executable = shutil.which(name)
+    if not executable:
+        return False
+    try:
+        subprocess.run(
+            [executable, "-version"],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+@unittest.skipUnless(
+    java_tool_works("javac") and java_tool_works("java"),
+    "A functional Java toolchain is required",
+)
 class VoucherExtractorAccountSecretTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

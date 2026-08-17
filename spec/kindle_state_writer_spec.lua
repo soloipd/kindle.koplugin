@@ -5,7 +5,7 @@ local helper = require("spec/test_helper")
 
 describe("KindleStateWriter", function()
     local KindleStateWriter
-    local original_execute
+    local original_popen
 
     setup(function()
         helper.setup_complete()
@@ -16,18 +16,27 @@ describe("KindleStateWriter", function()
         helper.install_sqlite_unavailable()
         package.loaded["lua/lib/kindle_state_writer"] = nil
         KindleStateWriter = require("lua/lib/kindle_state_writer")
-        original_execute = os.execute
+        original_popen = io.popen
     end)
 
     after_each(function()
-        rawset(os, "execute", original_execute)
+        rawset(io, "popen", original_popen)
     end)
 
-    local function captureExecute(result)
+    local function capturePopen(output, close_result)
         local executed_cmd
-        rawset(os, "execute", function(cmd)
+        rawset(io, "popen", function(cmd)
             executed_cmd = cmd
-            return result
+            if output == nil then
+                return nil
+            end
+            return {
+                read = function() return output end,
+                close = function()
+                    if close_result == nil then return true end
+                    return close_result
+                end,
+            }
         end)
         return function() return executed_cmd end
     end
@@ -42,7 +51,7 @@ describe("KindleStateWriter", function()
         end)
 
         it("should execute sqlite3 UPDATE via CLI", function()
-            local get_executed_cmd = captureExecute(0)
+            local get_executed_cmd = capturePopen("1\n")
 
             local ok = KindleStateWriter.writeByPath(
                 "/mnt/us/documents/test.kfx",
@@ -61,7 +70,7 @@ describe("KindleStateWriter", function()
         end)
 
         it("should return false when sqlite3 fails", function()
-            captureExecute(1)
+            capturePopen(nil)
 
             local ok = KindleStateWriter.writeByPath(
                 "/mnt/us/documents/test.kfx",
@@ -72,6 +81,39 @@ describe("KindleStateWriter", function()
 
             assert.is_false(ok)
         end)
+
+        it("returns false when sqlite updates zero catalog rows", function()
+            capturePopen("0\n")
+
+            local ok = KindleStateWriter.writeByPath(
+                "/mnt/us/documents/missing.kfx",
+                56,
+                1775769644,
+                "reading"
+            )
+
+            assert.is_false(ok)
+        end)
+
+        it("keeps shell syntax in a catalog path inert", function()
+            rawset(io, "popen", original_popen)
+            local marker = "/tmp/kindle-state-writer-shell-injection"
+            os.remove(marker)
+
+            KindleStateWriter._writeWithCLI(
+                "p_location = ?",
+                "\"; touch " .. marker .. "; #",
+                56,
+                6
+            )
+
+            local proof = io.open(marker, "rb")
+            if proof then
+                proof:close()
+                os.remove(marker)
+            end
+            assert.is_nil(proof)
+        end)
     end)
 
     describe("writeByCdeKey", function()
@@ -80,7 +122,7 @@ describe("KindleStateWriter", function()
         end)
 
         it("should write by ASIN with correct WHERE clause", function()
-            local get_executed_cmd = captureExecute(0)
+            local get_executed_cmd = capturePopen("1\n")
 
             local ok = KindleStateWriter.writeByCdeKey(
                 "B007N6JEII",
@@ -99,7 +141,7 @@ describe("KindleStateWriter", function()
 
     describe("writeByUuid", function()
         it("should write a virtual-library catalog row by p_uuid", function()
-            local get_executed_cmd = captureExecute(0)
+            local get_executed_cmd = capturePopen("1\n")
 
             local ok = KindleStateWriter.writeByUuid(
                 "f82913d4-094a-43c6-8166-e330d40c1d7c",
@@ -117,7 +159,7 @@ describe("KindleStateWriter", function()
 
     describe("percent formatting", function()
         it("should floor the percent value", function()
-            local get_executed_cmd = captureExecute(0)
+            local get_executed_cmd = capturePopen("1\n")
 
             KindleStateWriter.writeByPath(
                 "/mnt/us/documents/test.kfx",

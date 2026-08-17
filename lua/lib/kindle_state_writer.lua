@@ -11,6 +11,7 @@
 
 local StatusConverter = require("lua/lib/status_converter")
 local logger = require("logger")
+local util = require("util")
 
 local KindleStateWriter = {}
 
@@ -213,21 +214,22 @@ function KindleStateWriter._writeWithCLI(where_clause, where_value, percent_read
     local escaped = where_value:gsub("'", "''")
 
     local sql = string.format(
-        "UPDATE Entries SET p_percentFinished = %s, p_readState = %d WHERE %s;",
+        "UPDATE Entries SET p_percentFinished = %s, p_readState = %d WHERE %s; SELECT changes();",
         tostring(percent_read),
         read_state,
         where_clause:gsub("?", "'" .. escaped .. "'")
     )
 
-    local cmd = string.format("sqlite3 '%s' \"%s\" 2>/dev/null", CC_DB_PATH, sql)
-    local result = os.execute(cmd)
-
-    if type(result) == "number" then
-        result = result == 0
-    elseif type(result) == "boolean" then
-        -- already boolean
-    else
-        result = false
+    local cmd = util.shell_escape({ "sqlite3", CC_DB_PATH, sql })
+        .. " 2>/dev/null"
+    local handle = io.popen(cmd, "r")
+    local result = false
+    if handle then
+        local output = handle:read("*a") or ""
+        local close_ok = handle:close()
+        local changed = tonumber(output:match("^%s*(%d+)%s*$"))
+        result = close_ok ~= nil and close_ok ~= false
+            and changed ~= nil and changed > 0
     end
 
     if result then

@@ -5,14 +5,19 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/kindle.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/native-reading-progress-agent-v6.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/native-reading-progress-agent-v7.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
-LOCK_DIR="/tmp/kindle-progress-sync.lock"
-LOCK_PID="$LOCK_DIR/pid"
+LOCK_FILE="/tmp/kindle-progress-sync.lock"
 ATTACH_LOG="/tmp/kindle-progress-attach.log"
 PUBLISHED_RESULT="/mnt/us/koreader/settings/kindle_native_progress_debug.log"
+ATTACH_TIMEOUT_SECONDS=12
+RESULT_POLL_ATTEMPTS=12
+LOCK_PUBLISH_ATTEMPTS=3
 lock_acquired=0
 request_result=""
+owner_dir=""
+owner_temp=""
+owner_token=""
 
 if [ "$#" -ne 1 ]; then exit 2; fi
 payload="$1"
@@ -25,9 +30,13 @@ cleanup() {
     rm -f "$payload"
     if [ -n "$request_result" ]; then rm -f "$request_result"; fi
     if [ "$lock_acquired" -eq 1 ]; then
-        rm -f "$LOCK_PID"
-        rmdir "$LOCK_DIR" 2>/dev/null || true
+        published_owner="$(sed -n '1p' "$LOCK_FILE" 2>/dev/null)"
+        if test "$published_owner" = "$owner_token"; then
+            rm -f "$LOCK_FILE"
+        fi
     fi
+    if [ -n "$owner_temp" ]; then rm -f "$owner_temp"; fi
+    if [ -n "$owner_dir" ]; then rmdir "$owner_dir" 2>/dev/null || true; fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -39,25 +48,62 @@ printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 2
 case "$request_id" in ''|*[!0-9]*) exit 2 ;; esac
 request_result="/tmp/kindle-progress-result-$request_id.log"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    stale_pid=""
-    if [ -f "$LOCK_PID" ]; then stale_pid="$(sed -n '1p' "$LOCK_PID")"; fi
-    case "$stale_pid" in
-        ''|*[!0-9]*) lock_is_stale=1 ;;
-        *)
-            if kill -0 "$stale_pid" 2>/dev/null; then lock_is_stale=0
-            else lock_is_stale=1
-            fi
-            ;;
+owner_token="$$:$request_id"
+umask 077
+owner_dir="$(mktemp -d "/tmp/kindle-progress-sync.XXXXXX")" || exit 9
+owner_temp="$owner_dir/owner"
+printf '%s\n' "$owner_token" >"$owner_temp" || exit 9
+chmod 0600 "$owner_temp" || exit 9
+
+# v0.0.7 used a directory lock and could briefly expose it before publishing
+# its PID. Wait for an in-flight legacy owner before removing only a stale
+# upgrade remnant. New locks below are hard links to a fully written token, so
+# ownership publication itself is atomic.
+if [ -d "$LOCK_FILE" ]; then
+    publish_attempt=0
+    legacy_pid=""
+    while [ "$publish_attempt" -lt "$LOCK_PUBLISH_ATTEMPTS" ]; do
+        if [ -f "$LOCK_FILE/pid" ]; then
+            legacy_pid="$(sed -n '1p' "$LOCK_FILE/pid")"
+            break
+        fi
+        publish_attempt=$((publish_attempt + 1))
+        sleep 1
+    done
+    case "$legacy_pid" in
+        ''|*[!0-9]*) ;;
+        *) if kill -0 "$legacy_pid" 2>/dev/null; then exit 75; fi ;;
     esac
-    if [ "$lock_is_stale" -eq 1 ]; then
-        rm -f "$LOCK_PID"
-        rmdir "$LOCK_DIR" 2>/dev/null || true
+    rm -f "$LOCK_FILE/pid"
+    if ! rmdir "$LOCK_FILE" 2>/dev/null; then exit 75; fi
+fi
+
+if ! ln "$owner_temp" "$LOCK_FILE" 2>/dev/null; then
+    published_owner="$(sed -n '1p' "$LOCK_FILE" 2>/dev/null)"
+    owner_pid="${published_owner%%:*}"
+    owner_request="${published_owner#*:}"
+    owner_is_live=0
+    if [ "$published_owner" != "$owner_pid" ]; then
+        case "$owner_pid" in ''|*[!0-9]*) ;;
+            *)
+                case "$owner_request" in ''|*[!0-9]*) ;;
+                    *) if kill -0 "$owner_pid" 2>/dev/null; then owner_is_live=1; fi ;;
+                esac
+                ;;
+        esac
     fi
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then exit 75; fi
+    if [ "$owner_is_live" -eq 1 ]; then exit 75; fi
+
+    current_owner="$(sed -n '1p' "$LOCK_FILE" 2>/dev/null)"
+    if [ "$current_owner" != "$published_owner" ]; then exit 75; fi
+    rm -f "$LOCK_FILE"
+    if ! ln "$owner_temp" "$LOCK_FILE" 2>/dev/null; then exit 75; fi
 fi
 lock_acquired=1
-printf '%s\n' "$$" >"$LOCK_PID" || exit 9
+rm -f "$owner_temp"
+owner_temp=""
+if ! rmdir "$owner_dir"; then exit 9; fi
+owner_dir=""
 framework_pid="$(ps -eo pid,args 2>/dev/null \
     | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }')"
 case "$framework_pid" in ''|*[!0-9]*) exit 5 ;; esac
@@ -68,13 +114,14 @@ case "$framework_uid:$framework_gid" in *[!0-9:]*|:|:*|*:) exit 5 ;; esac
 chown "$framework_uid:$framework_gid" "$payload" || exit 9
 chmod 0600 "$payload" || exit 9
 rm -f "$request_result"
-if ! "$JAVA_BIN" --add-modules jdk.attach -cp "$LAUNCHER_CLASSES" \
+if ! timeout "$ATTACH_TIMEOUT_SECONDS" \
+    "$JAVA_BIN" --add-modules jdk.attach -cp "$LAUNCHER_CLASSES" \
     AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" >"$ATTACH_LOG" 2>&1; then
     exit 6
 fi
 
 attempt=0
-while [ "$attempt" -lt 90 ]; do
+while [ "$attempt" -lt "$RESULT_POLL_ATTEMPTS" ]; do
     if [ -f "$request_result" ] \
         && grep -Fqx "request_id=$request_id" "$request_result" \
         && grep -Eq '^success=(true|false)$' "$request_result"; then break; fi
