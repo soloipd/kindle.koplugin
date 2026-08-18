@@ -4,14 +4,16 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 
 PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
 
-from kfxlib.epub_position import (
-    PositionTranslationError, translate_native_position, translate_xpointer)
+from epub_position import (
+    PositionTranslationError, translate_native_position,
+    translate_native_positions, translate_xpointer)
 
 
 CONTAINER = b'''<?xml version="1.0"?>
@@ -78,6 +80,29 @@ class EpubPositionTests(unittest.TestCase):
         restored = translate_native_position(self.make_epub(), native["long"])
         self.assertEqual(
             "/body/DocFragment/body/p/text()[2].2", restored["xpointer"])
+
+    def test_reverse_batch_opens_and_parses_epub_once(self):
+        epub_path = self.make_epub()
+        positions = [
+            translate_xpointer(
+                epub_path, "/body/DocFragment/body/p/em/text().3")["long"],
+            translate_xpointer(
+                epub_path, "/body/DocFragment/body/p/text()[2].2")["long"],
+        ]
+        real_zip_file = zipfile.ZipFile
+        with mock.patch(
+                "epub_position.zipfile.ZipFile",
+                wraps=real_zip_file) as zip_file:
+            restored = translate_native_positions(epub_path, positions)
+        self.assertEqual(1, zip_file.call_count)
+        self.assertEqual(
+            "/body/DocFragment/body/p/em/text().3",
+            restored[0]["xpointer"],
+        )
+        self.assertEqual(
+            "/body/DocFragment/body/p/text()[2].2",
+            restored[1]["xpointer"],
+        )
 
 
 if __name__ == "__main__":

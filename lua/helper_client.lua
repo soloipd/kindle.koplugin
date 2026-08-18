@@ -183,6 +183,113 @@ local function hexEncode(value)
     end))
 end
 
+local function appendProgressStateDir(client, args)
+    if type(client.progress_state_dir) == "string"
+        and client.progress_state_dir ~= ""
+    then
+        table.insert(args, "--state-dir")
+        table.insert(args, client.progress_state_dir)
+    end
+    return args
+end
+
+--- Persist the newest close snapshot before ReaderUI unloads the document.
+--- The bundled helper detaches a root-private worker, so delivery survives a
+--- complete KOReader exit and coalesces rapid closes by ASIN.
+function HelperClient:enqueueCloseProgress(
+    asin, native_path, epub_path, xpointer, koreader_percent, status,
+    closed_at, previous_receipt, session_baseline
+)
+    if type(asin) ~= "string" or #asin ~= 10
+        or not asin:match("^B[A-Z0-9]+$")
+        or type(native_path) ~= "string"
+        or not native_path:match("^/mnt/us/documents/.+%.kfx$")
+        or type(epub_path) ~= "string"
+        or not epub_path:match("^/mnt/us/.+%.epub$")
+        or type(xpointer) ~= "string" or xpointer:sub(1, 1) ~= "/"
+        or type(koreader_percent) ~= "number"
+        or koreader_percent < 0 or koreader_percent > 100
+        or type(closed_at) ~= "number" or closed_at < 0
+        or closed_at ~= math.floor(closed_at)
+    then
+        return false, "invalid durable close snapshot"
+    end
+    status = type(status) == "string" and status or "reading"
+    local sequence = tostring(closed_at)
+        .. tostring(math.random(100000, 999999))
+    local args = {
+        self:getBinaryPath(),
+        "enqueue-close-progress",
+        "--asin", asin,
+        "--sequence", sequence,
+        "--native-path-hex", hexEncode(native_path),
+        "--epub-path-hex", hexEncode(epub_path),
+        "--xpointer-hex", hexEncode(xpointer),
+        "--koreader-percent", string.format("%.8f", koreader_percent),
+        "--status-hex", hexEncode(status),
+        "--closed-at", tostring(closed_at),
+        "--plugin-dir", self:getPluginPath(),
+    }
+    if type(previous_receipt) == "table"
+        and type(previous_receipt.long) == "string"
+        and type(previous_receipt.pid) == "number"
+    then
+        table.insert(args, "--previous-long")
+        table.insert(args, previous_receipt.long)
+        table.insert(args, "--previous-short")
+        table.insert(args, tostring(previous_receipt.pid))
+    end
+    local open_native = type(session_baseline) == "table"
+        and session_baseline.native or nil
+    local open_local = type(session_baseline) == "table"
+        and session_baseline.local_position or nil
+    if type(open_native) == "table"
+        and type(open_native.long) == "string"
+        and type(open_native.pid) == "number"
+        and type(open_local) == "table"
+        and type(open_local.long) == "string"
+        and type(open_local.pid) == "number"
+    then
+        table.insert(args, "--open-native-long")
+        table.insert(args, open_native.long)
+        table.insert(args, "--open-native-short")
+        table.insert(args, tostring(open_native.pid))
+        table.insert(args, "--open-local-long")
+        table.insert(args, open_local.long)
+        table.insert(args, "--open-local-short")
+        table.insert(args, tostring(open_local.pid))
+    end
+    local result, err = self:_run(appendProgressStateDir(self, args))
+    if not result or result.ok ~= true or result.queued ~= true
+        or result.sequence ~= sequence
+    then
+        return false, err or "durable close enqueue failed"
+    end
+    logger.info("KindlePlugin: durable close progress queued")
+    return true, nil, sequence
+end
+
+--- Start a detached replay worker for snapshots retained across a crash/reboot.
+function HelperClient:startCloseProgressWatcher()
+    local args = {
+        self:getBinaryPath(),
+        "start-close-progress",
+        "--plugin-dir", self:getPluginPath(),
+    }
+    local result, err = self:_run(appendProgressStateDir(self, args))
+    return result and result.ok == true, err
+end
+
+--- Read validated text-free completion receipts from root-private storage.
+function HelperClient:readCloseProgressReceipts()
+    local args = { self:getBinaryPath(), "close-progress-receipts" }
+    local result, err = self:_run(appendProgressStateDir(self, args))
+    if not result or result.ok ~= true or type(result.receipts) ~= "table" then
+        return nil, err or "durable close receipts unavailable"
+    end
+    return result.receipts
+end
+
 local function readNativeProgressResult(request_id, asin)
     local result_file = io.open(
         "/mnt/us/koreader/settings/kindle_native_progress_debug.log", "rb"

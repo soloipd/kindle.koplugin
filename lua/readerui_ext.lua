@@ -5,9 +5,52 @@
 --- Adapted from kobo.koplugin/src/readerui_ext.lua (reading_state_sync removed).
 
 local logger = require("logger")
+local Event = require("ui/event")
 local Trapper = require("ui/trapper")
 
 local ReaderUIExt = {}
+
+--- Capture the current rolling-renderer position before ReaderUI teardown.
+--- ReaderUI normally dispatches SaveSettings from inside onClose, which is too
+--- late for a durable snapshot queued by an outer onClose wrapper.
+local function captureLiveCloseSnapshot(reader_self)
+    local snapshot
+    local rolling = reader_self and reader_self.rolling
+    if rolling
+        and type(rolling.getBookLocation) == "function"
+        and type(rolling.getLastPercent) == "function"
+    then
+        local location_ok, xpointer = pcall(
+            rolling.getBookLocation, rolling)
+        local percent_ok, percent = pcall(
+            rolling.getLastPercent, rolling)
+        if location_ok and percent_ok
+            and type(xpointer) == "string"
+            and type(percent) == "number"
+            and percent >= 0 and percent <= 1
+        then
+            snapshot = {
+                xpointer = xpointer,
+                percent = percent,
+            }
+        end
+    end
+
+    -- Refresh every module's in-memory DocSettings view as KOReader's normal
+    -- close path will do moments later. This also makes the synchronous
+    -- fallback consume the live page if durable enqueue is unavailable.
+    if reader_self and type(reader_self.handleEvent) == "function" then
+        local saved = pcall(
+            reader_self.handleEvent,
+            reader_self,
+            Event:new("SaveSettings")
+        )
+        if not saved then
+            logger.warn("KindlePlugin: live close settings refresh failed")
+        end
+    end
+    return snapshot
+end
 
 ---
 --- Creates a new ReaderUIExt instance.
@@ -92,45 +135,77 @@ function ReaderUIExt:apply(ReaderUI)
             virtual_path = self.virtual_library:getVirtualPath(reader_self.document.file)
         end
 
+        local sync_context
+        local durable_attempted = false
+        local sync_completed_before_close = false
+        if virtual_path and reader_self.doc_settings
+            and self.reading_state_sync
+            and self.reading_state_sync:isAutomaticSyncEnabled()
+        then
+            local cde_key = self.reading_state_sync:extractCdeKey(
+                virtual_path, reader_self.doc_settings)
+            local book = self.virtual_library:getBook(virtual_path)
+            local source_path = book and book.source_path
+            if cde_key or source_path then
+                local live_snapshot = captureLiveCloseSnapshot(reader_self)
+                sync_context = {
+                    cde_key = cde_key,
+                    source_path = source_path,
+                }
+                logger.info("KindlePlugin: auto-syncing progress on book close")
+                if type(self.reading_state_sync.canSyncCloseInBackground)
+                        == "function"
+                    and self.reading_state_sync:canSyncCloseInBackground()
+                    and type(self.reading_state_sync
+                        .syncToKindleAutomaticInBackground) == "function"
+                then
+                    durable_attempted = true
+                    local queued = self.reading_state_sync
+                        :syncToKindleAutomaticInBackground(
+                        cde_key,
+                        source_path,
+                        reader_self.doc_settings,
+                        epub_path,
+                        live_snapshot
+                    )
+                    if not queued then
+                        -- A failed durable enqueue is rare. Complete the silent
+                        -- save while the document is still valid; never fork a
+                        -- second KOReader process from the close lifecycle.
+                        logger.warn("KindlePlugin: durable close queue unavailable")
+                        Trapper:wrap(function()
+                            self.reading_state_sync:syncToKindleAutomatic(
+                                cde_key,
+                                source_path,
+                                reader_self.doc_settings,
+                                epub_path
+                            )
+                        end)
+                        sync_completed_before_close = true
+                    end
+                end
+            end
+        end
+
         self.original_methods.onClose(reader_self, full_refresh)
 
         if virtual_path and reader_self.doc_settings then
             updateBookListCache(virtual_path, reader_self.doc_settings)
+        end
 
-            -- Sync progress to Kindle on book close
-            if self.reading_state_sync and self.reading_state_sync:isAutomaticSyncEnabled() then
-                local cde_key = self.reading_state_sync:extractCdeKey(virtual_path, reader_self.doc_settings)
-                -- Resolve source_path from the virtual library book data
-                local book = self.virtual_library:getBook(virtual_path)
-                local source_path = book and book.source_path
-                if cde_key or source_path then
-                    logger.info("KindlePlugin: auto-syncing progress on book close")
-                    if type(self.reading_state_sync.canSyncCloseInBackground)
-                            == "function"
-                        and self.reading_state_sync:canSyncCloseInBackground()
-                        and type(self.reading_state_sync
-                            .syncToKindleAutomaticInBackground) == "function"
-                    then
-                        local queued = self.reading_state_sync
-                            :syncToKindleAutomaticInBackground(
-                            cde_key,
-                            source_path,
-                            reader_self.doc_settings,
-                            epub_path
-                        )
-                        if queued then return end
-                        logger.warn("KindlePlugin: background close sync unavailable")
-                    end
-                    Trapper:wrap(function()
-                        self.reading_state_sync:syncToKindleAutomatic(
-                            cde_key,
-                            source_path,
-                            reader_self.doc_settings,
-                            epub_path
-                        )
-                    end)
-                end
-            end
+        -- Prompted directions still run in-process. Silent directions were
+        -- durably queued before ReaderUI unloaded the document.
+        if sync_context and not durable_attempted
+            and not sync_completed_before_close
+        then
+            Trapper:wrap(function()
+                self.reading_state_sync:syncToKindleAutomatic(
+                    sync_context.cde_key,
+                    sync_context.source_path,
+                    reader_self.doc_settings,
+                    epub_path
+                )
+            end)
         end
     end
 end

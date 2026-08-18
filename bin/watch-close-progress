@@ -1,0 +1,129 @@
+#!/bin/sh
+
+# Drain root-private close snapshots after KOReader has unloaded or exited.
+# A single detached watcher serializes ReaderSDK attach requests globally.
+set -u
+
+PLUGIN_DIR="${KINDLE_PLUGIN_DIR:-/mnt/us/koreader/plugins/kindle.koplugin}"
+STATE_DIR="${KINDLE_PROGRESS_STATE_DIR:-/var/local/kindle-koplugin}"
+OUTBOX_DIR="$STATE_DIR/progress-outbox"
+HELPER="$PLUGIN_DIR/kindle-helper"
+HELPER_RUNNER="${KINDLE_PROGRESS_HELPER_RUNNER:-}"
+LOCK_ROOT="${KINDLE_PROGRESS_LOCK_DIR:-/tmp}"
+WATCH_LOCK="$LOCK_ROOT/kindle-close-progress-watcher.lock"
+OWNER_FILE="$WATCH_LOCK/pid"
+PROC_ROOT="${KINDLE_PROC_ROOT:-/proc}"
+MAX_SWEEPS="${KINDLE_PROGRESS_MAX_SWEEPS:-3}"
+lock_acquired=0
+
+case "$MAX_SWEEPS" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$MAX_SWEEPS" -ge 1 ] && [ "$MAX_SWEEPS" -le 10 ] || exit 2
+case "$HELPER_RUNNER" in ''|/bin/sh) ;; *) exit 2 ;; esac
+
+run_helper() {
+    if [ -n "$HELPER_RUNNER" ]; then
+        "$HELPER_RUNNER" "$HELPER" "$@"
+    else
+        "$HELPER" "$@"
+    fi
+}
+
+running_owner() {
+    owner="$1"
+    case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$owner" 2>/dev/null || return 1
+    cmdline="$PROC_ROOT/$owner/cmdline"
+    [ -r "$cmdline" ] || return 0
+    script_arg="$(tr '\000' '\n' <"$cmdline" | sed -n '2p')"
+    [ "$script_arg" = "$0" ] || [ "$script_arg" = "$PLUGIN_DIR/bin/watch-close-progress" ]
+}
+
+write_owner() {
+    umask 077
+    printf '%s\n' "$$" >"$OWNER_FILE" || return 1
+    chmod 0600 "$OWNER_FILE" 2>/dev/null || true
+    lock_acquired=1
+}
+
+acquire_lock_once() {
+    if mkdir "$WATCH_LOCK" 2>/dev/null; then
+        write_owner
+        return $?
+    fi
+    [ -d "$WATCH_LOCK" ] && [ ! -L "$WATCH_LOCK" ] || return 1
+    owner="$(sed -n '1p' "$OWNER_FILE" 2>/dev/null || true)"
+    running_owner "$owner" && return 1
+    stale="$WATCH_LOCK.stale.$$"
+    [ ! -e "$stale" ] || return 1
+    mv "$WATCH_LOCK" "$stale" 2>/dev/null || return 1
+    if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+        rm -f "$stale/pid"
+        rmdir "$stale" 2>/dev/null || true
+        return 1
+    fi
+    if ! write_owner; then
+        rmdir "$WATCH_LOCK" 2>/dev/null || true
+        rm -f "$stale/pid"
+        rmdir "$stale" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$stale/pid"
+    rmdir "$stale" 2>/dev/null || true
+    return 0
+}
+
+# shellcheck disable=SC2329 # invoked by EXIT/HUP/INT/TERM traps
+release_lock() {
+    [ "$lock_acquired" -eq 1 ] || return 0
+    owner="$(sed -n '1p' "$OWNER_FILE" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] || return 0
+    rm -f "$OWNER_FILE"
+    rmdir "$WATCH_LOCK" 2>/dev/null || true
+}
+
+# If an older watcher is finishing its final empty sweep, wait long enough to
+# acquire the lock after it exits. This closes the enqueue/exit race without a
+# resident polling process.
+attempt=0
+while ! acquire_lock_once; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 3 ] || exit 0
+    sleep 1
+done
+trap release_lock EXIT
+trap 'exit 0' HUP INT TERM
+
+[ -f "$HELPER" ] || exit 3
+mkdir -p "$OUTBOX_DIR" || exit 3
+chmod 0700 "$STATE_DIR" "$OUTBOX_DIR" 2>/dev/null || true
+
+queue_has_requests() {
+    find "$OUTBOX_DIR" -maxdepth 1 -type f -name 'B?????????' 2>/dev/null \
+        | grep -q .
+}
+
+sweep=0
+empty_checks=0
+while [ "$sweep" -lt "$MAX_SWEEPS" ]; do
+    for request in "$OUTBOX_DIR"/B?????????; do
+        [ -f "$request" ] && [ ! -L "$request" ] || continue
+        run_helper process-close-progress \
+            --request "$request" --state-dir "$STATE_DIR" \
+            --plugin-dir "$PLUGIN_DIR" >/dev/null 2>&1 || true
+    done
+
+    if ! queue_has_requests; then
+        empty_checks=$((empty_checks + 1))
+        [ "$empty_checks" -ge 2 ] && exit 0
+        sleep 1
+        continue
+    fi
+    empty_checks=0
+    sweep=$((sweep + 1))
+    [ "$sweep" -lt "$MAX_SWEEPS" ] || break
+    # Retry both failures and a request that superseded an in-flight snapshot.
+    # The helper's checksum/lock check prevents stale acknowledgement.
+    sleep "$sweep"
+done
+
+exit 0

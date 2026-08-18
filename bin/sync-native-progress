@@ -18,14 +18,32 @@ request_result=""
 owner_dir=""
 owner_temp=""
 owner_token=""
+private_result=""
 
-if [ "$#" -ne 1 ]; then exit 2; fi
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then exit 2; fi
 payload="$1"
 case "$payload" in
     /tmp/kindle-progress-[0-9]*.properties) ;;
     *) exit 2 ;;
 esac
+payload_name="${payload#/tmp/kindle-progress-}"
+payload_id="${payload_name%.properties}"
+[ "$payload_name" = "$payload_id.properties" ] || exit 2
+case "$payload_id" in ''|*[!0-9]*) exit 2 ;; esac
+if [ "$#" -eq 2 ]; then
+    private_result="$2"
+    case "$private_result" in
+        /tmp/kindle-progress-worker-[0-9]*.log) ;;
+        *) exit 2 ;;
+    esac
+    private_name="${private_result#/tmp/kindle-progress-worker-}"
+    private_id="${private_name%.log}"
+    [ "$private_name" = "$private_id.log" ] || exit 2
+    case "$private_id" in ''|*[!0-9]*) exit 2 ;; esac
+    [ "$private_id" = "$payload_id" ] || exit 2
+fi
 
+# shellcheck disable=SC2329 # invoked by EXIT/HUP/INT/TERM traps
 cleanup() {
     rm -f "$payload"
     if [ -n "$request_result" ]; then rm -f "$request_result"; fi
@@ -138,5 +156,14 @@ published_temp="$PUBLISHED_RESULT.$$"
 if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLISHED_RESULT"; then
     rm -f "$published_temp"
     exit 8
+fi
+if [ -n "$private_result" ]; then
+    private_temp="$private_result.$$"
+    if ! cp "$request_result" "$private_temp" \
+        || ! chmod 0600 "$private_temp" \
+        || ! mv -f "$private_temp" "$private_result"; then
+        rm -f "$private_temp"
+        exit 8
+    fi
 fi
 exit 0

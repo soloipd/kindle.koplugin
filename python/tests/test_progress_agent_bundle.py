@@ -60,11 +60,13 @@ class ReadingProgressAgentBundleTests(unittest.TestCase):
             build_script,
         )
         self.assertIn('test -x "$STAGING/bin/sync-native-progress"', build_script)
+        self.assertIn('test -x "$STAGING/bin/watch-close-progress"', build_script)
         self.assertIn(
             'test -f "$STAGING/bin/native-reading-progress-agent-v7.jar"',
             build_script,
         )
         self.assertIn('test -f "$STAGING/dist/annotation_position.py"', build_script)
+        self.assertIn('test -f "$STAGING/dist/progress_outbox.py"', build_script)
         self.assertIn("libxml2.so.2", build_script)
         self.assertIn("libxslt.so.1", build_script)
         self.assertIn("libexslt.so.0", build_script)
@@ -81,6 +83,32 @@ class ReadingProgressAgentBundleTests(unittest.TestCase):
                 f'test ! -e "$STAGING/bin/native-reading-progress-agent-{obsolete}.jar"',
                 build_script,
             )
+
+    def test_runner_can_publish_a_request_scoped_private_result(self):
+        runner = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("kindle-progress-worker-", runner)
+        self.assertIn('[ "$private_id" = "$payload_id" ]', runner)
+        self.assertIn('chmod 0600 "$private_temp"', runner)
+
+    def test_close_lifecycle_never_forks_a_second_koreader_process(self):
+        sync_source = (ROOT / "lua" / "reading_state_sync.lua").read_text(
+            encoding="utf-8")
+        reader_source = (ROOT / "lua" / "readerui_ext.lua").read_text(
+            encoding="utf-8")
+        self.assertNotIn("_runBackgroundCloseTask", sync_source)
+        self.assertNotIn("background_process_runner", sync_source)
+        self.assertIn("enqueueCloseProgress", sync_source)
+        self.assertLess(
+            reader_source.index("syncToKindleAutomaticInBackground"),
+            reader_source.index("self.original_methods.onClose(reader_self"),
+        )
+
+    def test_durable_worker_invokes_shell_bridges_without_fuse_x_ok_checks(self):
+        worker = (ROOT / "python" / "progress_outbox.py").read_text(
+            encoding="utf-8")
+        self.assertIn('["/bin/sh", watcher]', worker)
+        self.assertIn('["/bin/sh", runner, payload_path, result_path]', worker)
+        self.assertNotIn("os.access(", worker)
 
     def test_bundled_agent_targets_java_8_and_contains_durability_checks(self):
         with zipfile.ZipFile(AGENT_JAR) as bundle:

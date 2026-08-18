@@ -196,5 +196,55 @@ describe("HelperClient", function()
             assert.equals("invalid native path", err)
             assert.is_false(invoked)
         end)
+
+        it("should enqueue a text-free durable close command", function()
+            local seen
+            local client = HelperClient:new({
+                runner = function(args)
+                    seen = args
+                    local sequence
+                    for index, value in ipairs(args) do
+                        if value == "--sequence" then sequence = args[index + 1] end
+                    end
+                    return { ok = true, queued = true, sequence = sequence }
+                end,
+            })
+            local ok = client:enqueueCloseProgress(
+                "B007N6JEII",
+                "/mnt/us/documents/book_B007N6JEII.kfx",
+                "/mnt/us/koreader/cache/kindle.koplugin/book.epub",
+                "/body/DocFragment/body/p/text().42",
+                54.25,
+                "reading",
+                1760000000,
+                { long = "ATwFAACbAAAA", pid = 442741 },
+                {
+                    native = { long = "ATwFAACcAAAA", pid = 442750 },
+                    local_position = { long = "ATwFAACaAAAA", pid = 442700 },
+                }
+            )
+            assert.is_true(ok)
+            assert.equals("enqueue-close-progress", seen[2])
+            assert.is_not_nil(table.concat(seen, " "):match("2f626f6479"))
+            assert.is_nil(table.concat(seen, " "):match("/body/DocFragment"))
+            assert.is_not_nil(table.concat(seen, " "):match("%-%-open%-native%-long ATwFAACcAAAA"))
+            assert.is_not_nil(table.concat(seen, " "):match("%-%-open%-local%-short 442700"))
+        end)
+
+        it("should read durable close receipts through the bundled helper", function()
+            local client = HelperClient:new({
+                runner = function(args)
+                    assert.equals("close-progress-receipts", args[2])
+                    return {
+                        ok = true,
+                        receipts = {
+                            { asin = "B007N6JEII", sequence = "1" },
+                        },
+                    }
+                end,
+            })
+            local receipts = client:readCloseProgressReceipts()
+            assert.equals("B007N6JEII", receipts[1].asin)
+        end)
     end)
 end)

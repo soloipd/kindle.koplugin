@@ -143,8 +143,12 @@ describe("ReaderUIExt", function()
             assert.equals("/mnt/us/documents/test.kfx", tracker.epub_path)
         end)
 
-        it("should queue silent close sync without blocking the reader UI", function()
-            local tracker = { background = false, blocking = false }
+        it("should durably queue silent sync before unloading the reader", function()
+            local tracker = {
+                background = false,
+                blocking = false,
+                reader_closed = false,
+            }
             local mock_vlib = createMockVirtualLibrary(true)
             local mock_sync = createMockSync(true)
             mock_sync.canSyncCloseInBackground = function() return true end
@@ -154,6 +158,7 @@ describe("ReaderUIExt", function()
             mock_sync.syncToKindleAutomaticInBackground = function(
                 self, cde_key, source_path, doc_settings, epub_path
             )
+                assert.is_false(tracker.reader_closed)
                 tracker.background = true
                 tracker.cde_key = cde_key
                 tracker.source_path = source_path
@@ -171,6 +176,9 @@ describe("ReaderUIExt", function()
                     end,
                 }
             )
+            mock_rui.onClose = function()
+                tracker.reader_closed = true
+            end
             local ext = ReaderUIExt:new()
             ext:init(mock_vlib, mock_sync)
             ext:apply(mock_rui)
@@ -179,9 +187,107 @@ describe("ReaderUIExt", function()
 
             assert.is_true(tracker.background)
             assert.is_false(tracker.blocking)
+            assert.is_true(tracker.reader_closed)
             assert.equals("B001", tracker.cde_key)
             assert.equals("/mnt/us/documents/test.kfx", tracker.source_path)
             assert.equals("/mnt/us/documents/test.kfx", tracker.epub_path)
+        end)
+
+        it("should queue the live rolling page instead of stale sidecar state", function()
+            local tracker = {
+                reader_closed = false,
+                save_event = false,
+            }
+            local data = {
+                percent_finished = 0.40,
+                last_xpointer = "/body/p/text().40",
+                summary = { status = "reading" },
+            }
+            local doc_settings = {
+                readSetting = function(_, key) return data[key] end,
+                saveSetting = function(_, key, value) data[key] = value end,
+            }
+            local mock_vlib = createMockVirtualLibrary(true)
+            local mock_sync = createMockSync(true)
+            mock_sync.canSyncCloseInBackground = function() return true end
+            mock_sync.syncToKindleAutomaticInBackground = function(
+                _, _, _, _, _, live_snapshot
+            )
+                assert.is_false(tracker.reader_closed)
+                tracker.live_snapshot = live_snapshot
+                tracker.persisted_xpointer = data.last_xpointer
+                tracker.persisted_percent = data.percent_finished
+                return true
+            end
+            local mock_rui = createMockReaderUI(
+                "KINDLE_VIRTUAL://B001/test.kfx", doc_settings)
+            mock_rui.rolling = {
+                getBookLocation = function()
+                    return "/body/p/text().54"
+                end,
+                getLastPercent = function() return 0.54 end,
+            }
+            mock_rui.handleEvent = function()
+                tracker.save_event = true
+                data.last_xpointer = "/body/p/text().54"
+                data.percent_finished = 0.54
+            end
+            mock_rui.onClose = function()
+                tracker.reader_closed = true
+            end
+            local ext = ReaderUIExt:new()
+            ext:init(mock_vlib, mock_sync)
+            ext:apply(mock_rui)
+
+            mock_rui.onClose(mock_rui, false)
+
+            assert.is_true(tracker.save_event)
+            assert.is_true(tracker.reader_closed)
+            assert.same({
+                xpointer = "/body/p/text().54",
+                percent = 0.54,
+            }, tracker.live_snapshot)
+            assert.equals("/body/p/text().54", tracker.persisted_xpointer)
+            assert.equals(0.54, tracker.persisted_percent)
+        end)
+
+        it("should synchronously save before unload if durable enqueue fails", function()
+            local order = {}
+            local mock_vlib = createMockVirtualLibrary(true)
+            local mock_sync = createMockSync(true)
+            mock_sync.canSyncCloseInBackground = function() return true end
+            mock_sync.syncToKindleAutomaticInBackground = function()
+                table.insert(order, "enqueue")
+                return false
+            end
+            mock_sync.syncToKindleAutomatic = function()
+                table.insert(order, "fallback")
+                return true
+            end
+            local mock_rui = createMockReaderUI(
+                "KINDLE_VIRTUAL://B001/test.kfx",
+                {
+                    readSetting = function(self, key)
+                        if key == "percent_finished" then return 0.54 end
+                        if key == "last_xpointer" then
+                            return "/body/p/text().54"
+                        end
+                        if key == "summary" then
+                            return { status = "reading" }
+                        end
+                    end,
+                }
+            )
+            mock_rui.onClose = function()
+                table.insert(order, "close")
+            end
+            local ext = ReaderUIExt:new()
+            ext:init(mock_vlib, mock_sync)
+            ext:apply(mock_rui)
+
+            mock_rui.onClose(mock_rui, false)
+
+            assert.same({ "enqueue", "fallback", "close" }, order)
         end)
 
         it("should refresh the complete virtual shelf cache from KOReader metadata", function()

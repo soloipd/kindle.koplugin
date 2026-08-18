@@ -186,6 +186,7 @@ function KindlePlugin:init()
     reading_state_sync:setPlugin(self, SYNC_DIRECTION)
     if self.settings.sync_reading_state then
         reading_state_sync:setEnabled(true)
+        reading_state_sync:recoverDurableCloseProgress(true)
     end
 end
 

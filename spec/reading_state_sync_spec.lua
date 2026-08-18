@@ -657,16 +657,110 @@ describe("ReadingStateSync", function()
             assert.is_false(sync:canSyncCloseInBackground())
         end)
 
-        it("should serialize background close jobs and keep the latest snapshot", function()
-            local sync = ReadingStateSync:new()
+        it("should capture exact native and KOReader positions for each open session", function()
+            local local_at_open = {
+                long = "ATwFAACaAAAA", pid = 442700, percent = 52,
+            }
+            local native_at_open = {
+                long = "ATwFAACcAAAA", pid = 442750, percent = 39.5,
+            }
+            local client = {
+                translatePosition = function() return local_at_open end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            setupPluginSettings(sync)
+            sync.getAuthoritativeKindleXPointer = function()
+                return "/body/DocFragment/body/p/text().39", nil,
+                    native_at_open, false
+            end
+            local original = mockReadKindleState(sync, {
+                percent_read = 39.5,
+                timestamp = 1000,
+                status = "reading",
+                kindle_status = 1,
+            })
+            local ds = createMockDocSettings("/cache/book.epub", {
+                percent_finished = 0.52,
+                last_xpointer = "/body/DocFragment/body/p/text().52",
+                summary = { status = "reading" },
+            })
+
+            assert.is_false(sync:syncFromKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            local baseline = sync:getOpenSessionBaseline(
+                "B007N6JEII", history_path, "/cache/book.epub")
+            assert.equals(native_at_open.long, baseline.native.long)
+            assert.equals(native_at_open.pid, baseline.native.pid)
+            assert.equals(local_at_open.long, baseline.local_position.long)
+            assert.equals(local_at_open.pid, baseline.local_position.pid)
+
+            restoreReadKindleState(sync, original)
+        end)
+
+        it("should let a close-time KOReader move win when native stayed at its open coordinate", function()
+            local open_native = {
+                long = "ATwFAACcAAAA", pid = 442750, percent = 39.5,
+            }
+            local open_local = {
+                long = "ATwFAACaAAAA", pid = 442700, percent = 52,
+            }
+            local close_local = {
+                long = "ATwFAACdAAAA", pid = 442800, percent = 40.2,
+            }
+            local client = {
+                translatePosition = function() return close_local end,
+                readNativeProgress = function() return open_native end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            setupPluginSettings(sync)
+            assert.is_true(sync:stageOpenSessionBaseline(
+                "B007N6JEII", history_path, "/cache/book.epub",
+                open_native, open_local))
+            local original_read = mockReadKindleState(sync, {
+                percent_read = 39.5,
+                timestamp = 1000,
+                status = "reading",
+                kindle_status = 1,
+            })
+            local original_write, writes = mockWriteKindleState(sync)
+            sync.saveAuthoritativeNativePosition = function()
+                return close_local.percent, close_local
+            end
+            local ds = createMockDocSettings("/cache/book.epub", {
+                percent_finished = 0.55,
+                last_xpointer = "/body/DocFragment/body/p/text().55",
+                summary = { status = "reading" },
+            })
+
+            assert.is_true(sync:syncToKindleAutomatic(
+                "B007N6JEII", history_path, ds, "/cache/book.epub"))
+            assert.equals(1, #writes)
+            assert.equals(close_local.percent, writes[1].percent)
+
+            restoreReadKindleState(sync, original_read)
+            restoreWriteKindleState(sync, original_write)
+        end)
+
+        it("should durably queue the exact close snapshot and prior receipt", function()
+            local queued = {}
+            local client = {
+                readCloseProgressReceipts = function() return {} end,
+                enqueueCloseProgress = function(_, ...)
+                    table.insert(queued, { ... })
+                    return true
+                end,
+            }
+            local sync = ReadingStateSync:new(client)
             sync:setEnabled(true)
             local plugin = setupPluginSettings(sync)
-            plugin.settings.enable_position_source_of_truth = false
-            local jobs = {}
-            sync.background_process_runner = function(task, completed)
-                table.insert(jobs, { task = task, completed = completed })
-                return true
-            end
+            plugin.settings.position_sync_receipts = {
+                B007N6JEII = {
+                    long = "ATwFAACbAAAA", pid = 442741, percent = 39,
+                    direction = "push", synced_at = 1000,
+                },
+            }
             local first = createMockDocSettings("/cache/book.epub", {
                 percent_finished = 0.40,
                 last_xpointer = "/body/p/text().40",
@@ -677,104 +771,94 @@ describe("ReadingStateSync", function()
                 last_xpointer = "/body/p/text().54",
                 summary = { status = "reading" },
             })
+            assert.is_true(sync:stageOpenSessionBaseline(
+                "B007N6JEII", history_path, "/cache/book.epub",
+                { long = "ATwFAACcAAAA", pid = 442750, percent = 39.5 },
+                { long = "ATwFAACaAAAA", pid = 442700, percent = 52.0 }
+            ))
 
             assert.is_true(sync:syncToKindleAutomaticInBackground(
                 "B007N6JEII", history_path, first, "/cache/book.epub"))
-            assert.equals(1, #jobs)
-            assert.equals(0.40,
-                sync.background_close_active.doc_settings
-                    :readSetting("percent_finished"))
-
             assert.is_true(sync:syncToKindleAutomaticInBackground(
-                "B007N6JEII", history_path, latest, "/cache/book.epub"))
-            assert.equals(1, #jobs)
-            assert.equals(0.54,
-                sync.background_close_pending.B007N6JEII.doc_settings
-                    :readSetting("percent_finished"))
+                "B007N6JEII", history_path, latest, "/cache/book.epub", {
+                    xpointer = "/body/p/text().55",
+                    percent = 0.55,
+                }))
+            assert.equals(2, #queued)
+            assert.equals("B007N6JEII", queued[2][1])
+            assert.equals(history_path, queued[2][2])
+            assert.equals("/cache/book.epub", queued[2][3])
+            assert.equals("/body/p/text().55", queued[2][4])
+            assert.is_true(math.abs(queued[2][5] - 55) < 0.000001)
+            assert.equals("reading", queued[2][6])
+            assert.equals("ATwFAACbAAAA", queued[2][8].long)
+            assert.equals(442741, queued[2][8].pid)
+            assert.equals("ATwFAACcAAAA", queued[2][9].native.long)
+            assert.equals(442750, queued[2][9].native.pid)
+            assert.equals("ATwFAACaAAAA", queued[2][9].local_position.long)
+            assert.equals(442700, queued[2][9].local_position.pid)
+        end)
 
-            jobs[1].completed({
-                asin = "B007N6JEII",
-                success = true,
-                needs_retry = false,
-                receipt = {
-                    long = "ATwFAACbAAAA", pid = 442741, percent = 40,
-                    direction = "push", synced_at = 1000,
-                },
-            })
-            assert.equals(2, #jobs)
-            assert.equals(0.54,
-                sync.background_close_active.doc_settings
-                    :readSetting("percent_finished"))
+        it("should adopt each durable completion receipt exactly once", function()
+            local watcher_starts = 0
+            local client = {
+                startCloseProgressWatcher = function()
+                    watcher_starts = watcher_starts + 1
+                    return true
+                end,
+                readCloseProgressReceipts = function()
+                    return {
+                        {
+                            asin = "B007N6JEII",
+                            sequence = "1760000000000001",
+                            checksum = string.rep("a", 64),
+                            long = "ATwFAACbAAAA",
+                            pid = 442741,
+                            native_percent = 39.5,
+                            koreader_percent = 54.25,
+                            status = "reading",
+                            synced_at = 1760000000,
+                            action = "saved",
+                        },
+                    }
+                end,
+            }
+            local sync = ReadingStateSync:new(client)
+            sync:setEnabled(true)
+            local plugin = setupPluginSettings(sync)
+
+            assert.is_true(sync:recoverDurableCloseProgress(true))
+            local saves_after_first = plugin.save_count
+            assert.is_false(sync:recoverDurableCloseProgress(false))
+            assert.equals(1, watcher_starts)
             assert.equals("ATwFAACbAAAA",
                 plugin.settings.position_sync_receipts.B007N6JEII.long)
+            assert.equals(442741,
+                plugin.settings.position_sync_receipts.B007N6JEII.pid)
+            assert.equals(39.5,
+                plugin.settings.position_sync_receipts.B007N6JEII.percent)
+            assert.equals(saves_after_first, plugin.save_count)
+            assert.equals(
+                "1760000000000001:" .. string.rep("a", 64),
+                plugin.settings.durable_close_progress_sequences.B007N6JEII)
         end)
 
-        it("should not let stale background completion replace newer parent state", function()
-            local sync = ReadingStateSync:new()
-            sync:setEnabled(true)
-            local plugin = setupPluginSettings(sync)
-            plugin.settings.enable_position_source_of_truth = false
-            local completed
-            sync.background_process_runner = function(task, callback)
-                completed = callback
-                return true
-            end
-            local ds = createMockDocSettings("/cache/book.epub", {
-                percent_finished = 0.40,
-                last_xpointer = "/body/p/text().40",
-                summary = { status = "reading" },
-            })
-            assert.is_true(sync:syncToKindleAutomaticInBackground(
-                "B007N6JEII", history_path, ds, "/cache/book.epub"))
-            plugin.settings.position_sync_receipts = {
-                B007N6JEII = {
-                    long = "ATwFAACzAAAA", pid = 442799, percent = 54,
-                    direction = "push", synced_at = 1100,
-                },
+        it("should fail closed when the durable enqueue is unavailable", function()
+            local client = {
+                readCloseProgressReceipts = function() return {} end,
+                enqueueCloseProgress = function() return false, "unavailable" end,
             }
-
-            completed({
-                asin = "B007N6JEII",
-                success = true,
-                needs_retry = false,
-                receipt = {
-                    long = "ATwFAACbAAAA", pid = 442741, percent = 40,
-                    direction = "push", synced_at = 1000,
-                },
-            })
-
-            assert.equals("ATwFAACzAAAA",
-                plugin.settings.position_sync_receipts.B007N6JEII.long)
-        end)
-
-        it("should retry a failed background worker no more than three times", function()
-            local sync = ReadingStateSync:new()
+            local sync = ReadingStateSync:new(client)
             sync:setEnabled(true)
-            local plugin = setupPluginSettings(sync)
-            plugin.settings.enable_position_source_of_truth = false
-            local jobs = {}
-            sync.background_process_runner = function(task, callback)
-                table.insert(jobs, { task = task, completed = callback })
-                return true
-            end
+            setupPluginSettings(sync)
             local ds = createMockDocSettings("/cache/book.epub", {
                 percent_finished = 0.54,
                 last_xpointer = "/body/p/text().54",
                 summary = { status = "reading" },
             })
-
-            assert.is_true(sync:syncToKindleAutomaticInBackground(
+            assert.is_false(sync:syncToKindleAutomaticInBackground(
                 "B007N6JEII", history_path, ds, "/cache/book.epub"))
-            assert.equals(1, #jobs)
-            jobs[1].completed(nil)
-            assert.equals(2, #jobs)
-            jobs[2].completed(nil)
-            assert.equals(3, #jobs)
-            jobs[3].completed(nil)
-
-            assert.equals(3, #jobs)
             assert.is_nil(sync.background_close_active)
-            assert.is_nil(next(sync.background_close_pending))
         end)
 
         it("should not pull when automatic sync is disabled", function()

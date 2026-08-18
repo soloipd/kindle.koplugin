@@ -39,11 +39,31 @@ A KOReader plugin that lets you browse and read your Kindle book library directl
    KOReader Bookshelf, or History; cached Kindle EPUBs are mapped back to their
    native source book automatically
 
-Automatic sync runs before opening and after closing a book. A silent close
-returns to the shelf immediately and performs the native save in one
-low-priority background worker. Rapid closes are serialized, the newest queued
-snapshot for each book replaces an older one, and transient work is retried no
-more than three times. **Ask me** waits
+Automatic sync runs before opening and when closing a book. A silent close
+first dispatches KOReader's normal in-memory `SaveSettings` event and captures
+the live rolling-renderer XPointer and percentage. It therefore cannot queue
+the previous sidecar page merely because ReaderUI has not begun its own close
+flush yet. The live snapshot is committed to a mode-0600, SHA-256-protected
+outbox under `/var/local` before ReaderUI unloads the document, then a detached
+shell watcher invokes the bundled helper. The request also carries a
+coordinate-only three-way merge base: KOReader's exact position at open and
+Kindle's exact position at open. At delivery time, a KOReader move is saved
+silently only if Kindle stayed at its open coordinate. A native-only move wins,
+two independent moves remain a conflict, and opening then closing without a
+page move cannot overwrite an already-divergent reader. No percentage or nearby
+offset tolerance is used. The in-memory baseline is replaced on every mapped
+book open and cannot leak across books. The watcher never forks a second KOReader
+process or inherits KOReader's power-event listener. A full KOReader exit
+therefore cannot strand the old child-pipe loop that caused high-CPU freezes in
+v0.0.8.
+
+Rapid closes are serialized per book. A newer queued snapshot atomically
+replaces an older one, stale work is revalidated before any native write, and a
+save already in flight records an exact intermediate receipt so the same
+watcher can advance to the newest snapshot on its next sweep. Transient work is
+retried up to three times and remains durable for replay at the next plugin
+start. A committed request is not duplicated merely because watcher startup
+failed. **Ask me** waits
 for your answer at that lifecycle boundary, **Always sync** applies silently,
 and **Never** leaves the destination unchanged. The plugin translates KOReader
 XPointers to Kindle KFX coordinates, persists them through Kindle's ReaderSDK,
@@ -82,9 +102,22 @@ only after the exact native save is read back and the shelf update succeeds,
 or—when pulling in the other direction—after KOReader's live renderer confirms
 the exact destination.
 
+Close requests necessarily contain the converted EPUB path, native KFX path,
+and XPointer needed for delayed translation, but they are root-only and are
+removed after success. Durable receipts and published diagnostics contain only
+ASINs, exact coordinates, renderer-specific percentages, status codes,
+sequences, checksums, and outcomes—never titles, paths, selected text, notes,
+account data, or credentials. Publishing the optional diagnostic does not alter
+KOReader's shared settings-directory permissions.
+
 Native ReaderSDK writes use a three-second request window and report text-free
 per-stage timings. The attach helper and result wait are each hard-capped at 12
 seconds, so a failed firmware bridge cannot leave KOReader waiting indefinitely.
+The latest close-queue outcome is published at
+`/mnt/us/koreader/settings/kindle_native_progress_queue_debug.log`. Its `action`
+is `saved`, `already_current`, `native_won`, `no_session_change`, or `conflict`;
+it contains coordinates and percentages only. A conflict never overwrites
+either reader.
 
 #### Experimental conflict-safe position model
 
@@ -109,9 +142,10 @@ intentional rewinds and starts a bounded new session when reading begins again
 after completion.
 
 If an interrupted close leaves a newer persisted KOReader page while Kindle
-still matches the last acknowledged position, the next mapped-book open retries
-the exact native save and repairs the shelf. Failed saves remain unacknowledged
-and are retried after a plugin restart. If both readers moved independently,
+still matches the last acknowledged position, the durable watcher or the next
+mapped-book open retries the exact native save and repairs the shelf. Failed
+saves remain unacknowledged and retry immediately with a bounded budget, then
+again after a plugin restart. If both readers moved independently,
 the model fails closed and preserves both observations instead of guessing.
 Kindle and KOReader display percentages are stored as separate facts even when
 they refer to the same exact KFX coordinate. Open-time destination verification

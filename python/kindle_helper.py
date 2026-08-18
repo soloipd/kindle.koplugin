@@ -38,18 +38,21 @@ if not os.path.isdir(_PLUGIN_MODULES):
 if os.path.isdir(_PLUGIN_MODULES) and _PLUGIN_MODULES not in sys.path:
     sys.path.insert(0, _PLUGIN_MODULES)
 
-from kfxlib.epub_position import (
-    PositionTranslationError, translate_native_position, translate_pair)
-from annotation_position import normalize_annotation_ends
+from epub_position import (
+    PositionTranslationError, translate_native_position,
+    translate_native_positions, translate_pair)
 
-from dedrm.drmion import (
-    CONT_SIGNATURE,
-    DRMION_SIGNATURE,
-    decrypt as decrypt_drmion,
-    encryption_key_ids,
-)
+CONT_SIGNATURE = b"CONT"
+DRMION_SIGNATURE = b"\xeaDRMION\xee"
+PROGRESS_STATE_DIR = "/var/local/kindle-koplugin"
 
 VERSION = 1
+
+
+def encryption_key_ids(data):
+    """Load the heavy DRM parser only for DRM-bearing commands."""
+    from dedrm.drmion import encryption_key_ids as extract_key_ids
+    return extract_key_ids(data)
 
 # ---------------------------------------------------------------------------
 # JSON output helpers (same protocol as the Go binary)
@@ -131,7 +134,8 @@ def _find_page_key(kfx_path, cache_dir):
 
 def _decrypt_drmion(data, page_key):
     """Decrypt a DRMION blob using the shared DeDRM parser."""
-    return decrypt_drmion(data, page_key)
+    from dedrm.drmion import decrypt
+    return decrypt(data, page_key)
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +716,7 @@ def cmd_translate_position(args):
 
 def cmd_translate_positions(args):
     try:
+        from annotation_position import normalize_annotation_ends
         with open(args.request, "r", encoding="utf-8") as request_file:
             requests = json.load(request_file)
         if not isinstance(requests, list) or len(requests) > 1000:
@@ -762,7 +767,7 @@ def cmd_translate_native_positions(args):
             requests = json.load(request_file)
         if not isinstance(requests, list) or len(requests) > 1000:
             raise ValueError("invalid native position request list")
-        translated = []
+        native_positions = []
         for request in requests:
             if not isinstance(request, dict):
                 raise ValueError("invalid native position request")
@@ -770,10 +775,12 @@ def cmd_translate_native_positions(args):
             end = request.get("end")
             if not isinstance(start, str) or not isinstance(end, str):
                 raise ValueError("native annotation range is incomplete")
-            translated.append({
-                "start": translate_native_position(args.epub, start),
-                "end": translate_native_position(args.epub, end),
-            })
+            native_positions.extend((start, end))
+        converted = iter(translate_native_positions(args.epub, native_positions))
+        translated = [
+            {"start": next(converted), "end": next(converted)}
+            for _request in requests
+        ]
         exit_json({
             "version": VERSION,
             "ok": True,
@@ -784,6 +791,134 @@ def cmd_translate_native_positions(args):
         exit_json({
             "version": VERSION,
             "ok": False,
+            "message": str(error),
+        }, code=1)
+
+
+def _decode_cli_hex(value, field, maximum=65536):
+    from progress_outbox import ProgressOutboxError
+    if not isinstance(value, str) or len(value) > maximum * 2 \
+            or len(value) % 2 or not re.fullmatch(r"[0-9a-f]*", value):
+        raise ProgressOutboxError("invalid " + field)
+    try:
+        decoded = bytes.fromhex(value).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ProgressOutboxError("invalid " + field) from error
+    if "\x00" in decoded or "\n" in decoded or "\r" in decoded:
+        raise ProgressOutboxError("invalid " + field)
+    return decoded
+
+
+def cmd_enqueue_close_progress(args):
+    """Atomically coalesce one close snapshot and detach its worker."""
+    from progress_outbox import ProgressOutboxError, enqueue
+    try:
+        previous = None
+        if args.previous_long or args.previous_short is not None:
+            previous = {
+                "long": args.previous_long,
+                "pid": args.previous_short,
+            }
+        session_baseline = None
+        if any((
+            args.open_native_long,
+            args.open_native_short is not None,
+            args.open_local_long,
+            args.open_local_short is not None,
+        )):
+            session_baseline = {
+                "native": {
+                    "long": args.open_native_long,
+                    "pid": args.open_native_short,
+                },
+                "local": {
+                    "long": args.open_local_long,
+                    "pid": args.open_local_short,
+                },
+            }
+        result = enqueue({
+            "asin": args.asin,
+            "sequence": args.sequence,
+            "native_path": _decode_cli_hex(
+                args.native_path_hex, "native path", 4096),
+            "epub_path": _decode_cli_hex(
+                args.epub_path_hex, "EPUB path", 4096),
+            "xpointer": _decode_cli_hex(args.xpointer_hex, "XPointer"),
+            "koreader_percent": args.koreader_percent,
+            "status": _decode_cli_hex(args.status_hex, "status", 64),
+            "closed_at": args.closed_at,
+            "previous": previous,
+            "session_baseline": session_baseline,
+        }, state_dir=args.state_dir, plugin_dir=args.plugin_dir)
+        exit_json({"version": VERSION, **result})
+    except (OSError, ProgressOutboxError, ValueError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "code": "progress_enqueue_failed",
+            "message": str(error),
+        }, code=1)
+
+
+def cmd_start_close_progress(args):
+    """Replay requests left by an interrupted close or device reboot."""
+    from progress_outbox import ProgressOutboxError, start_watcher
+    try:
+        start_watcher(args.plugin_dir, args.state_dir)
+        exit_json({"version": VERSION, "ok": True, "started": True})
+    except (OSError, ProgressOutboxError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "code": "progress_watcher_failed",
+            "message": str(error),
+        }, code=1)
+
+
+def cmd_process_close_progress(args):
+    """Run one durable request; the watcher owns retries and serialization."""
+    from progress_outbox import (
+        ProgressOutboxError,
+        ProgressOutboxTransient,
+        process_request,
+    )
+    try:
+        result = process_request(
+            args.request, state_dir=args.state_dir,
+            plugin_dir=args.plugin_dir, debug_path=args.debug_path)
+        exit_json({"version": VERSION, **result})
+    except ProgressOutboxTransient as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "code": "progress_delivery_transient",
+            "message": str(error),
+        }, code=75)
+    except (OSError, ProgressOutboxError, ValueError,
+            zipfile.BadZipFile, PositionTranslationError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "code": "progress_delivery_rejected",
+            "message": str(error),
+        }, code=2)
+
+
+def cmd_progress_receipts(args):
+    """Return only validated, text-free durable completion receipts."""
+    from progress_outbox import ProgressOutboxError, list_receipts
+    try:
+        receipts = list_receipts(args.state_dir)
+        exit_json({
+            "version": VERSION,
+            "ok": True,
+            "receipts": receipts,
+        })
+    except (OSError, ProgressOutboxError) as error:
+        exit_json({
+            "version": VERSION,
+            "ok": False,
+            "code": "progress_receipts_failed",
             "message": str(error),
         }, code=1)
 
@@ -844,6 +979,39 @@ def main():
     p_translate_natives.add_argument("--epub", required=True)
     p_translate_natives.add_argument("--request", required=True)
 
+    p_enqueue_progress = sub.add_parser("enqueue-close-progress")
+    p_enqueue_progress.add_argument("--asin", required=True)
+    p_enqueue_progress.add_argument("--sequence", required=True)
+    p_enqueue_progress.add_argument("--native-path-hex", required=True)
+    p_enqueue_progress.add_argument("--epub-path-hex", required=True)
+    p_enqueue_progress.add_argument("--xpointer-hex", required=True)
+    p_enqueue_progress.add_argument("--koreader-percent", required=True)
+    p_enqueue_progress.add_argument("--status-hex", required=True)
+    p_enqueue_progress.add_argument("--closed-at", required=True)
+    p_enqueue_progress.add_argument("--previous-long", default="")
+    p_enqueue_progress.add_argument("--previous-short", type=int)
+    p_enqueue_progress.add_argument("--open-native-long", default="")
+    p_enqueue_progress.add_argument("--open-native-short", type=int)
+    p_enqueue_progress.add_argument("--open-local-long", default="")
+    p_enqueue_progress.add_argument("--open-local-short", type=int)
+    p_enqueue_progress.add_argument("--state-dir", default=PROGRESS_STATE_DIR)
+    p_enqueue_progress.add_argument("--plugin-dir", required=True)
+
+    p_start_progress = sub.add_parser("start-close-progress")
+    p_start_progress.add_argument("--state-dir", default=PROGRESS_STATE_DIR)
+    p_start_progress.add_argument("--plugin-dir", required=True)
+
+    p_process_progress = sub.add_parser("process-close-progress")
+    p_process_progress.add_argument("--request", required=True)
+    p_process_progress.add_argument("--state-dir", default=PROGRESS_STATE_DIR)
+    p_process_progress.add_argument("--plugin-dir", required=True)
+    p_process_progress.add_argument("--debug-path", default=(
+        "/mnt/us/koreader/settings/"
+        "kindle_native_progress_queue_debug.log"))
+
+    p_progress_receipts = sub.add_parser("close-progress-receipts")
+    p_progress_receipts.add_argument("--state-dir", default=PROGRESS_STATE_DIR)
+
     # extract-key
     p_extract = sub.add_parser("extract-key")
     p_extract.add_argument("--input", required=True,
@@ -870,6 +1038,10 @@ def main():
         "translate-positions": cmd_translate_positions,
         "translate-native-position": cmd_translate_native_position,
         "translate-native-positions": cmd_translate_native_positions,
+        "enqueue-close-progress": cmd_enqueue_close_progress,
+        "start-close-progress": cmd_start_close_progress,
+        "process-close-progress": cmd_process_close_progress,
+        "close-progress-receipts": cmd_progress_receipts,
         "extract-key": cmd_extract_key,
     }
 
